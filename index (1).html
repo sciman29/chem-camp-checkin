@@ -1,0 +1,1632 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ระบบเช็คชื่อเข้าเรียน สอวน. เคมี</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+    <style>
+        body { font-family: 'Sarabun', sans-serif; background-color: #f8fafc; }
+        ::-webkit-scrollbar { height: 6px; width: 6px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        @media print {
+            @page { size: A4; margin: 12mm 10mm; }
+            body * { visibility: hidden; }
+            .print-area, .print-area * { visibility: visible; }
+            .print-area { position: absolute; left: 0; top: 0; width: 100%; }
+            .no-print { display: none !important; }
+            .print-header { display: block !important; text-align: center; margin-bottom: 16px; }
+            .print-only { display: block !important; }
+            .screen-only-table { display: none !important; }
+            .daily-report-print, .daily-report-print table, .daily-report-print th, .daily-report-print td {
+                font-family: 'TH SarabunIT๙','TH Sarabun New','Sarabun',sans-serif !important;
+                font-size: 16pt !important;
+            }
+        }
+        .print-header { display: none; }
+        .print-only { display: none; }
+        .compact-row { break-inside: avoid; page-break-inside: avoid; }
+        .seg-btn { transition: all .15s ease; }
+        .toast-enter { animation: toastIn .2s ease-out; }
+        @keyframes toastIn { from { opacity:0; transform: translateY(-8px);} to { opacity:1; transform: translateY(0);} }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+
+        /* ============================== API LAYER ============================== */
+        const urlParams = new URLSearchParams(window.location.search);
+        const getStoredApiUrl = () => { try { return localStorage.getItem('posn_api_url') || ''; } catch (e) { return ''; } };
+        const setStoredApiUrl = (u) => { try { localStorage.setItem('posn_api_url', u); } catch (e) {} };
+        const getCache = () => { try { const c = localStorage.getItem('posn_cache'); return c ? JSON.parse(c) : null; } catch (e) { return null; } };
+        const setCache = (d) => { try { localStorage.setItem('posn_cache', JSON.stringify(d)); } catch (e) {} };
+
+        // ผูก URL ของ Apps Script ไว้ตายตัว นักเรียนเปิดลิงก์นี้แล้วใช้งานได้ทันที ไม่ต้องตั้งค่าเอง
+        const DEFAULT_API_URL = 'https://script.google.com/macros/s/AKfycbxjK6Ks8iN5r2JU6kE5Z_0bwTmhLU3zqrGRI6_Za_SVZmQUcrAGYAwMJsKcDDtTfHbXTA/exec';
+        const INITIAL_API_URL = urlParams.get('api') || getStoredApiUrl() || DEFAULT_API_URL;
+        if (urlParams.get('api')) setStoredApiUrl(urlParams.get('api'));
+
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+        async function apiGet(apiUrl) {
+            const sep = apiUrl.includes('?') ? '&' : '?';
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    const res = await fetch(apiUrl + sep + 't=' + Date.now(), { cache: 'no-store' });
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    const data = await res.json();
+                    if (!data.ok) throw new Error(data.error || 'response not ok');
+                    setCache(data);
+                    return { data, fromCache: false };
+                } catch (e) {
+                    if (attempt === 2) {
+                        const cached = getCache();
+                        if (cached) return { data: cached, fromCache: true };
+                        throw e;
+                    }
+                    await sleep(700 * (attempt + 1));
+                }
+            }
+        }
+
+        async function apiPost(apiUrl, payload) {
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    const res = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                        body: JSON.stringify(payload)
+                    });
+                    const data = await res.json();
+                    if (!data.ok) throw new Error(data.error || 'failed');
+                    return true;
+                } catch (e) {
+                    if (attempt === 2) return false;
+                    await sleep(700 * (attempt + 1));
+                }
+            }
+        }
+
+        /* ============================== HELPERS ============================== */
+        const pad2 = n => String(n).padStart(2, '0');
+        const toDateKey = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+        const todayKey = () => toDateKey(new Date());
+        const thaiDate = (dateKey) => {
+            const d = new Date(dateKey + 'T00:00:00');
+            return d.toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+        };
+        const timeToDec = (str) => { const [h, m] = String(str).split(':').map(Number); return h + (m || 0) / 60; };
+
+        // กันพัง: ถ้า Google Sheets แอบแปลงค่าเวลากลับมาเพี้ยน (เช่นได้ ISO date string แทน "08:30")
+        // ให้ใช้ค่าปกติแทนไปก่อน แทนที่จะโชว์ข้อความแปลกๆ ให้ผู้ใช้เห็น
+        const SAFE_DEFAULT_SETTINGS = { AmStart: '08:30', AmEnd: '12:00', PmStart: '12:30', PmEnd: '16:00' };
+        const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+        const sanitizeSettings = (raw) => {
+            const s = { ...raw };
+            ['AmStart', 'AmEnd', 'PmStart', 'PmEnd'].forEach(k => {
+                if (!TIME_RE.test(String(s[k]))) s[k] = SAFE_DEFAULT_SETTINGS[k];
+            });
+            if (isNaN(Number(s.SchoolLat))) s.SchoolLat = '13.8176';
+            if (isNaN(Number(s.SchoolLng))) s.SchoolLng = '100.5613';
+            if (isNaN(Number(s.Radius)) || Number(s.Radius) <= 0) s.Radius = '500';
+            if (isNaN(Number(s.AmHours)) || Number(s.AmHours) <= 0) s.AmHours = '2.5';
+            if (isNaN(Number(s.PmHours)) || Number(s.PmHours) <= 0) s.PmHours = '3';
+            if (isNaN(Number(s.EarlyMinutes))) s.EarlyMinutes = '60';
+            return s;
+        };
+
+        const getDistance = (lat1, lon1, lat2, lon2) => {
+            const R = 6371e3;
+            const p1 = lat1 * Math.PI / 180, p2 = lat2 * Math.PI / 180;
+            const dp = (lat2 - lat1) * Math.PI / 180, dl = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        };
+
+        // Fold the append-only attendance log into "current status per date/student/session"
+        // (latest timestamp wins, so edits/overrides always take effect)
+        function foldAttendance(log) {
+            const map = {};
+            const sorted = [...log].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+            sorted.forEach(entry => {
+                const { date, studentId, session } = entry;
+                if (!map[date]) map[date] = {};
+                if (!map[date][studentId]) map[date][studentId] = {};
+                map[date][studentId][session] = entry.status;
+                map[date][studentId][session + 'Method'] = entry.method;
+                map[date][studentId][session + 'Time'] = entry.timestamp;
+                if (entry.leaveDoc) map[date][studentId].leaveDoc = entry.leaveDoc;
+            });
+            return map;
+        }
+
+        const parsePhases = (settings) => {
+            try { const p = JSON.parse(settings.Phases || '[]'); return Array.isArray(p) ? p : []; } catch (e) { return []; }
+        };
+
+        const dateRange = (start, end) => {
+            const dates = [];
+            let d = new Date(start + 'T00:00:00');
+            const endD = new Date(end + 'T00:00:00');
+            let guard = 0;
+            while (d <= endD && guard < 400) { dates.push(toDateKey(d)); d.setDate(d.getDate() + 1); guard++; }
+            return dates;
+        };
+
+        // สรุปผลของนักเรียน 1 คน ในช่วง (phase) เดียว: จำนวนครั้งที่มา/ขาด/ลา และร้อยละเทียบกับช่วงทั้งหมด
+        const computePhaseStats = (studentId, phase, attendanceMap, settings) => {
+            const dates = dateRange(phase.start, phase.end);
+            const today = todayKey();
+            const amH = Number(settings.AmHours), pmH = Number(settings.PmHours);
+            let present = 0, absent = 0, leave = 0, attendedHours = 0, remainingHours = 0;
+            const totalHours = dates.length * (amH + pmH);
+            dates.forEach(date => {
+                const rec = (attendanceMap[date] && attendanceMap[date][studentId]) || {};
+                if (rec.am === 'present') attendedHours += amH;
+                if (rec.pm === 'present') attendedHours += pmH;
+                if (date <= today) {
+                    ['am', 'pm'].forEach(sess => {
+                        const st = rec[sess] || 'absent';
+                        if (st === 'present') present++;
+                        else if (st === 'leave') leave++;
+                        else absent++;
+                    });
+                } else {
+                    // วันที่ยังไม่มาถึง ยังมีโอกาสมาเรียนเพิ่มได้อีก
+                    remainingHours += amH + pmH;
+                }
+            });
+            const percent = totalHours ? (attendedHours / totalHours * 100) : 0;
+            // "เสี่ยง" จริง ก็ต่อเมื่อต่อให้มาเรียนครบทุกวันที่เหลือ ก็ยังไม่ถึงเกณฑ์ที่กำหนด
+            const maxPossiblePercent = totalHours ? ((attendedHours + remainingHours) / totalHours * 100) : 0;
+            const isAtRisk = maxPossiblePercent < Number(phase.minPercent);
+            return { present, absent, leave, attendedHours, totalHours, percent, isAtRisk };
+        };
+
+        const computeOverallStats = (studentId, phases, attendanceMap, settings) => {
+            let attendedHours = 0, totalHours = 0, present = 0, absent = 0, leave = 0;
+            phases.forEach(ph => {
+                const s = computePhaseStats(studentId, ph, attendanceMap, settings);
+                attendedHours += s.attendedHours; totalHours += s.totalHours;
+                present += s.present; absent += s.absent; leave += s.leave;
+            });
+            const percent = totalHours ? (attendedHours / totalHours * 100) : 0;
+            return { present, absent, leave, attendedHours, totalHours, percent };
+        };
+
+        const STATUS_META = {
+            present: { label: 'มา', short: 'ม', cls: 'bg-emerald-100 text-emerald-700 border-emerald-200' },
+            leave: { label: 'ลา', short: 'ล', cls: 'bg-amber-100 text-amber-700 border-amber-200' },
+            absent: { label: 'ขาด', short: 'ข', cls: 'bg-rose-100 text-rose-700 border-rose-200' }
+        };
+
+        /* ============================== SMALL UI PRIMITIVES ============================== */
+        function Toast({ toast }) {
+            if (!toast) return null;
+            const cls = toast.type === 'error' ? 'bg-rose-600' : toast.type === 'success' ? 'bg-emerald-600' : 'bg-slate-800';
+            return (
+                <div className={`toast-enter fixed top-4 left-1/2 -translate-x-1/2 z-[100] ${cls} text-white px-4 py-3 rounded-xl shadow-lg text-sm font-medium max-w-[92vw] text-center no-print`}>
+                    {toast.text}
+                </div>
+            );
+        }
+
+        function useConfirmArm() {
+            const [armedKey, setArmedKey] = useState(null);
+            const timerRef = useRef(null);
+            const arm = (key) => { setArmedKey(key); clearTimeout(timerRef.current); timerRef.current = setTimeout(() => setArmedKey(null), 3000); };
+            const isArmed = (key) => armedKey === key;
+            const reset = () => { setArmedKey(null); clearTimeout(timerRef.current); };
+            return { arm, isArmed, reset };
+        }
+
+        function SegmentedStatus({ value, onChange, disabled }) {
+            return (
+                <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden">
+                    {['present', 'leave', 'absent'].map(s => (
+                        <button key={s} disabled={disabled} onClick={() => onChange(s)}
+                            className={`seg-btn px-2.5 py-1.5 text-xs font-bold ${value === s
+                                ? (s === 'present' ? 'bg-emerald-600 text-white' : s === 'leave' ? 'bg-amber-500 text-white' : 'bg-rose-600 text-white')
+                                : 'bg-white text-slate-400 hover:bg-slate-50'} ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                            {STATUS_META[s].short}
+                        </button>
+                    ))}
+                    {value && (
+                        <button disabled={disabled} onClick={() => onChange('')} title="ล้างสถานะ (กดผิด/ยกเลิกการเลือก)"
+                            className={`seg-btn px-2 py-1.5 text-xs bg-white text-slate-400 hover:bg-slate-100 hover:text-slate-600 border-l border-slate-200 ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                            <i className="fas fa-eraser"></i>
+                        </button>
+                    )}
+                </div>
+            );
+        }
+
+        /* ============================== CONNECT SCREEN (first run) ============================== */
+        function ConnectScreen({ onConnected }) {
+            const [value, setValue] = useState('');
+            const [testing, setTesting] = useState(false);
+            const [error, setError] = useState('');
+
+            const handleConnect = async () => {
+                const url = value.trim();
+                if (!url.startsWith('https://script.google.com/')) {
+                    setError('⚠️ ลิงก์ควรขึ้นต้นด้วย https://script.google.com/ และลงท้ายด้วย /exec');
+                    return;
+                }
+                setTesting(true); setError('');
+                try {
+                    const { data } = await apiGet(url);
+                    if (!data || !data.settings) throw new Error('bad response');
+                    setStoredApiUrl(url);
+                    onConnected(url);
+                } catch (e) {
+                    setError('❌ เชื่อมต่อไม่สำเร็จ ตรวจสอบว่า Deploy เป็น Web app แบบ "Anyone" แล้ว');
+                }
+                setTesting(false);
+            };
+
+            return (
+                <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+                    <div className="max-w-md w-full bg-white rounded-2xl shadow-xl p-8">
+                        <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-600">
+                            <i className="fas fa-plug text-2xl"></i>
+                        </div>
+                        <h2 className="text-xl font-bold text-slate-800 mb-2 text-center">ตั้งค่าการเชื่อมต่อครั้งแรก</h2>
+                        <p className="text-sm text-slate-500 mb-5 text-center">วาง Web App URL ที่ได้จากการ Deploy Google Apps Script (ลงท้ายด้วย /exec)</p>
+                        <input type="text" value={value} onChange={e => setValue(e.target.value)} placeholder="https://script.google.com/macros/s/.../exec"
+                            className="w-full p-3 border border-slate-300 rounded-lg text-sm mb-3" />
+                        {error && <p className="text-rose-500 text-xs mb-3">{error}</p>}
+                        <button onClick={handleConnect} disabled={testing} className="w-full bg-slate-900 text-white p-3 rounded-lg font-medium disabled:opacity-50">
+                            {testing ? 'กำลังทดสอบการเชื่อมต่อ...' : 'เชื่อมต่อ'}
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        /* ============================== APP ============================== */
+        function App() {
+            const [apiUrl, setApiUrl] = useState(INITIAL_API_URL);
+            const [booted, setBooted] = useState(false);
+            const [role, setRole] = useState('select');
+            const [settings, setSettings] = useState(null);
+            const [rawSettings, setRawSettings] = useState(null);
+            const [roster, setRoster] = useState([]);
+            const [attendanceLog, setAttendanceLog] = useState([]);
+            const [currentStudentId, setCurrentStudentId] = useState('');
+            const [inputValue, setInputValue] = useState('');
+            const [loginError, setLoginError] = useState('');
+            const [toast, setToast] = useState(null);
+            const [refreshing, setRefreshing] = useState(false);
+            const [usingCache, setUsingCache] = useState(false);
+
+            const showToast = (text, type = 'info') => {
+                setToast({ text, type });
+                clearTimeout(showToast._t);
+                showToast._t = setTimeout(() => setToast(null), 3200);
+            };
+
+            const attendanceMap = useMemo(() => foldAttendance(attendanceLog), [attendanceLog]);
+
+            const load = async (silent) => {
+                if (!apiUrl) return;
+                if (!silent) setRefreshing(true);
+                try {
+                    const { data, fromCache } = await apiGet(apiUrl);
+                    setSettings(sanitizeSettings(data.settings));
+                    setRawSettings(data.settings);
+                    setRoster(data.students || []);
+                    setAttendanceLog(data.attendance || []);
+                    setUsingCache(fromCache);
+                    if (fromCache && !silent) showToast('⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กำลังแสดงข้อมูลสำรองล่าสุดในเครื่อง', 'error');
+                    else if (!silent) showToast('✅ อัปเดตข้อมูลล่าสุดแล้ว', 'success');
+                } catch (e) {
+                    if (!silent) showToast('⚠️ โหลดข้อมูลไม่สำเร็จ และไม่มีข้อมูลสำรองในเครื่องนี้', 'error');
+                }
+                if (!silent) setRefreshing(false);
+                setBooted(true);
+            };
+
+            useEffect(() => { load(true); }, [apiUrl]);
+            useEffect(() => {
+                if (role !== 'teacher' && role !== 'student') return;
+                const id = setInterval(() => load(true), 25000);
+                return () => clearInterval(id);
+            }, [role, apiUrl]);
+
+            if (!apiUrl) {
+                return <ConnectScreen onConnected={(u) => { setApiUrl(u); }} />;
+            }
+            if (!booted) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-slate-50">
+                        <div className="text-center text-slate-400">
+                            <i className="fas fa-flask text-3xl mb-3 animate-pulse"></i>
+                            <p>กำลังโหลดระบบ...</p>
+                        </div>
+                    </div>
+                );
+            }
+
+            const logout = () => { setRole('select'); setInputValue(''); setLoginError(''); setCurrentStudentId(''); };
+
+            const handleStudentLogin = () => {
+                if (!inputValue.trim()) { setLoginError('กรุณากรอกรหัสประจำตัว'); return; }
+                if (roster.length === 0) { setLoginError('❌ ยังไม่มีรายชื่อนักเรียนในระบบ กรุณาแจ้งครูผู้สอน'); return; }
+                const searchId = String(inputValue).trim().toUpperCase();
+                const found = roster.find(s => String(s.id).trim().toUpperCase() === searchId);
+                if (found) { setCurrentStudentId(found.id); setRole('student'); setLoginError(''); setInputValue(''); }
+                else setLoginError(`❌ ไม่พบรหัส "${searchId}" ในระบบ`);
+            };
+
+            const handleTeacherLogin = () => {
+                if (inputValue === String(settings.TeacherPin)) { setRole('teacher'); setLoginError(''); setInputValue(''); }
+                else setLoginError('❌ รหัสผ่านไม่ถูกต้อง');
+            };
+
+            return (
+                <React.Fragment>
+                    <Toast toast={toast} />
+                    {usingCache && (role === 'teacher' || role === 'student') && (
+                        <div className="bg-amber-500 text-white text-xs text-center py-1.5 no-print">
+                            ⚠️ ออฟไลน์ชั่วคราว — กำลังแสดงข้อมูลสำรองล่าสุด การเช็คชื่อจะบันทึกเมื่อเชื่อมต่อได้อีกครั้ง
+                        </div>
+                    )}
+                    {role === 'select' && <RoleSelectScreen settings={settings} onPick={(r) => { setRole(r); setLoginError(''); setInputValue(''); }} />}
+                    {role === 'login_student' && (
+                        <StudentLoginScreen inputValue={inputValue} setInputValue={setInputValue} loginError={loginError}
+                            onBack={() => setRole('select')} onSubmit={handleStudentLogin} />
+                    )}
+                    {role === 'login_teacher' && (
+                        <TeacherLoginScreen inputValue={inputValue} setInputValue={setInputValue} loginError={loginError}
+                            onBack={() => setRole('select')} onSubmit={handleTeacherLogin} />
+                    )}
+                    {role === 'student' && (
+                        <StudentView studentId={currentStudentId} roster={roster} settings={settings} attendanceMap={attendanceMap}
+                            apiUrl={apiUrl} onLogout={logout} onRefresh={() => load(false)} refreshing={refreshing} showToast={showToast} />
+                    )}
+                    {role === 'teacher' && (
+                        <TeacherView roster={roster} settings={settings} rawSettings={rawSettings} attendanceMap={attendanceMap} apiUrl={apiUrl}
+                            onLogout={logout} onRefresh={() => load(false)} refreshing={refreshing} showToast={showToast} />
+                    )}
+                </React.Fragment>
+            );
+        }
+
+        /* ============================== LOGIN SCREENS ============================== */
+        function HowToUseModal({ settings, onClose }) {
+            return (
+                <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-4 z-50">
+                    <div className="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl max-h-[90vh] flex flex-col">
+                        <div className="p-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center shrink-0">
+                            <h3 className="font-bold text-slate-800 text-lg"><i className="fas fa-circle-question text-blue-600 mr-2"></i>วิธีใช้งาน (สำหรับนักเรียน)</h3>
+                            <button onClick={onClose} className="text-slate-400 hover:text-rose-500"><i className="fas fa-times text-xl"></i></button>
+                        </div>
+                        <div className="p-5 space-y-4 overflow-y-auto text-sm text-slate-700">
+                            <div className="flex gap-3">
+                                <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 font-bold flex items-center justify-center shrink-0">1</div>
+                                <div>
+                                    <p className="font-bold text-slate-800">เข้าสู่ระบบด้วยรหัสประจำตัว</p>
+                                    <p className="text-slate-500">กดปุ่ม "เข้าสู่ระบบ นักเรียน" แล้วกรอกรหัสประจำตัวของตัวเอง ไม่ต้องตั้งรหัสผ่านใดๆ</p>
+                                </div>
+                            </div>
+                            <div className="flex gap-3">
+                                <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 font-bold flex items-center justify-center shrink-0">2</div>
+                                <div>
+                                    <p className="font-bold text-slate-800">ต้องอยู่ที่โรงเรียนถึงจะเช็คชื่อได้</p>
+                                    <p className="text-slate-500">ระบบใช้ตำแหน่ง GPS ของมือถือตรวจสอบว่าอยู่ในบริเวณโรงเรียนจริง กดเช็คชื่อได้เมื่ออุปกรณ์อนุญาตให้เข้าถึงตำแหน่ง (กด "อนุญาต" เมื่อเบราว์เซอร์ถาม)</p>
+                                </div>
+                            </div>
+                            <div className="flex gap-3">
+                                <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 font-bold flex items-center justify-center shrink-0">3</div>
+                                <div>
+                                    <p className="font-bold text-slate-800">เช็คชื่อได้เฉพาะช่วงเวลาที่กำหนด</p>
+                                    <p className="text-slate-500">รอบเช้าและรอบบ่ายจะเปิดให้เช็คชื่อเฉพาะช่วงเวลาที่ตั้งไว้เท่านั้น ปุ่มจะกดไม่ได้ถ้ายังไม่ถึงเวลาหรือหมดเวลาแล้ว</p>
+                                </div>
+                            </div>
+                            <div className="flex gap-3">
+                                <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 font-bold flex items-center justify-center shrink-0">4</div>
+                                <div>
+                                    <p className="font-bold text-slate-800">ดูสถานะและชั่วโมงเรียนของตัวเอง</p>
+                                    <p className="text-slate-500">หลังเข้าสู่ระบบจะเห็นว่าวันนี้เช็คชื่อไปแล้วหรือยัง และดูสรุปชั่วโมงเรียนสะสมเทียบกับเกณฑ์ที่ต้องผ่านในแต่ละช่วงได้ทันที</p>
+                                </div>
+                            </div>
+                            <div className="flex gap-3">
+                                <div className="w-8 h-8 rounded-full bg-amber-100 text-amber-700 font-bold flex items-center justify-center shrink-0"><i className="fas fa-exclamation text-xs"></i></div>
+                                <div>
+                                    <p className="font-bold text-slate-800">ถ้าลืมเช็คชื่อหรือมีเหตุจำเป็นต้องลา</p>
+                                    <p className="text-slate-500">แจ้งครูผู้ดูแลค่ายโดยตรง เพื่อให้บันทึกสถานะและแนบหลักฐานการลาให้ในระบบ</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="p-4 border-t border-slate-100 shrink-0">
+                            <button onClick={onClose} className="w-full bg-slate-900 text-white p-3 rounded-lg font-medium">เข้าใจแล้ว</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function RoleSelectScreen({ settings, onPick }) {
+            const [showGuide, setShowGuide] = useState(false);
+
+            useEffect(() => {
+                let seen = false;
+                try { seen = localStorage.getItem('posn_seen_guide') === '1'; } catch (e) {}
+                if (!seen) setShowGuide(true);
+            }, []);
+
+            const closeGuide = () => {
+                setShowGuide(false);
+                try { localStorage.setItem('posn_seen_guide', '1'); } catch (e) {}
+            };
+
+            return (
+                <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+                    <div className="max-w-md w-full bg-white rounded-2xl shadow-xl p-8 text-center relative">
+                        <button onClick={() => setShowGuide(true)} className="absolute top-4 right-4 text-slate-400 hover:text-blue-600" title="วิธีใช้งาน">
+                            <i className="fas fa-circle-question text-xl"></i>
+                        </button>
+                        <div className="w-20 h-20 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-600">
+                            <i className="fas fa-flask text-3xl"></i>
+                        </div>
+                        <h1 className="text-3xl font-bold text-slate-800 mb-2">{settings.CampName}</h1>
+                        <p className="text-slate-500 mb-8">ระบบเช็คชื่อเข้าเรียน (GPS)</p>
+                        <div className="space-y-3">
+                            <button onClick={() => onPick('login_student')} className="w-full p-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold flex items-center justify-center gap-3 shadow-md">
+                                <i className="fas fa-user"></i> เข้าสู่ระบบ นักเรียน
+                            </button>
+                            <button onClick={() => onPick('login_teacher')} className="w-full p-4 bg-slate-800 hover:bg-slate-900 text-white rounded-xl font-bold flex items-center justify-center gap-3 shadow-md">
+                                <i className="fas fa-user-tie"></i> เข้าสู่ระบบ ครู/ผู้ดูแล
+                            </button>
+                        </div>
+                        <button onClick={() => setShowGuide(true)} className="mt-5 text-sm text-blue-600 hover:underline">
+                            <i className="fas fa-book-open mr-1"></i> วิธีใช้งานระบบ
+                        </button>
+                    </div>
+                    {showGuide && <HowToUseModal settings={settings} onClose={closeGuide} />}
+                </div>
+            );
+        }
+
+        function StudentLoginScreen({ inputValue, setInputValue, loginError, onBack, onSubmit }) {
+            return (
+                <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+                    <div className="max-w-md w-full bg-white rounded-2xl shadow-xl p-8 text-center relative">
+                        <button onClick={onBack} className="text-slate-400 hover:text-slate-600 absolute top-6 left-6"><i className="fas fa-arrow-left text-xl"></i></button>
+                        <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4 text-emerald-600">
+                            <i className="fas fa-user text-2xl"></i>
+                        </div>
+                        <h2 className="text-2xl font-bold text-slate-800 mb-2">นักเรียน</h2>
+                        <p className="text-slate-500 mb-6 text-sm">กรุณากรอกรหัสประจำตัวของนักเรียน</p>
+                        <input type="text" placeholder="เช่น 20557" value={inputValue} onChange={(e) => setInputValue(e.target.value)}
+                            onKeyPress={(e) => e.key === 'Enter' && onSubmit()}
+                            className="w-full p-3 border border-slate-300 rounded-xl mb-2 text-center text-lg focus:ring-2 focus:ring-emerald-500 outline-none" />
+                        {loginError && <p className="text-rose-500 text-sm mb-4 font-medium">{loginError}</p>}
+                        <button onClick={onSubmit} className="w-full bg-emerald-600 text-white font-bold p-4 rounded-xl shadow-md hover:bg-emerald-700">เข้าสู่ระบบ</button>
+                    </div>
+                </div>
+            );
+        }
+
+        function TeacherLoginScreen({ inputValue, setInputValue, loginError, onBack, onSubmit }) {
+            return (
+                <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+                    <div className="max-w-md w-full bg-white rounded-2xl shadow-xl p-8 text-center relative">
+                        <button onClick={onBack} className="text-slate-400 hover:text-slate-600 absolute top-6 left-6"><i className="fas fa-arrow-left text-xl"></i></button>
+                        <div className="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4 text-white">
+                            <i className="fas fa-user-tie text-2xl"></i>
+                        </div>
+                        <h2 className="text-2xl font-bold text-slate-800 mb-2">ผู้สอน / ผู้ดูแล</h2>
+                        <p className="text-slate-500 mb-6 text-sm">กรุณากรอกรหัสผ่าน (PIN)</p>
+                        <input type="password" placeholder="รหัสผ่าน" value={inputValue} onChange={(e) => setInputValue(e.target.value)}
+                            onKeyPress={(e) => e.key === 'Enter' && onSubmit()}
+                            className="w-full p-3 border border-slate-300 rounded-xl mb-2 text-center text-lg focus:ring-2 focus:ring-slate-800 outline-none tracking-[0.4em]" />
+                        {loginError && <p className="text-rose-500 text-sm mb-4 font-medium">{loginError}</p>}
+                        <button onClick={onSubmit} className="w-full bg-slate-800 text-white font-bold p-4 rounded-xl shadow-md hover:bg-slate-900">เข้าสู่ระบบ</button>
+                    </div>
+                </div>
+            );
+        }
+
+        /* ============================== STUDENT VIEW ============================== */
+        function StudentView({ studentId, roster, settings, attendanceMap, apiUrl, onLogout, onRefresh, refreshing, showToast }) {
+            const me = roster.find(s => String(s.id) === String(studentId));
+            const [isCheckingIn, setIsCheckingIn] = useState(false);
+            const [checkInMessage, setCheckInMessage] = useState(null);
+
+            if (!me) return <div className="p-6 text-center">ไม่พบข้อมูลของคุณ</div>;
+
+            const today = todayKey();
+            const todayRec = (attendanceMap[today] && attendanceMap[today][me.id]) || {};
+            const phases = parsePhases(settings);
+            const phaseStats = phases.map(ph => ({ phase: ph, stats: computePhaseStats(me.id, ph, attendanceMap, settings) }));
+            const overall = computeOverallStats(me.id, phases, attendanceMap, settings);
+
+            const withinWindow = (session) => {
+                const now = new Date();
+                const t = now.getHours() + now.getMinutes() / 60;
+                const early = Number(settings.EarlyMinutes || 0) / 60;
+                const startDec = session === 'am' ? timeToDec(settings.AmStart) : timeToDec(settings.PmStart);
+                const endDec = session === 'am' ? timeToDec(settings.AmEnd) : timeToDec(settings.PmEnd);
+                return t >= (startDec - early) && t <= endDec;
+            };
+
+            const decToTime = (dec) => { const h = Math.floor(((dec % 24) + 24) % 24); const m = Math.round((dec - Math.floor(dec)) * 60); return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`; };
+
+            const handleCheckIn = (session) => {
+                if (!withinWindow(session)) {
+                    const early = Number(settings.EarlyMinutes || 0) / 60;
+                    const openDec = (session === 'am' ? timeToDec(settings.AmStart) : timeToDec(settings.PmStart)) - early;
+                    const closeStr = session === 'am' ? settings.AmEnd : settings.PmEnd;
+                    setCheckInMessage({ text: `❌ ขณะนี้ไม่อยู่ในช่วงเวลาเช็คชื่อรอบ${session === 'am' ? 'เช้า' : 'บ่าย'} (${decToTime(openDec)} - ${closeStr} น.)`, type: 'error' });
+                    return;
+                }
+                setIsCheckingIn(true);
+                setCheckInMessage({ text: 'กำลังดึงตำแหน่งพิกัด GPS ของคุณ...', type: 'loading' });
+
+                const process = async (lat, lng) => {
+                    const distance = getDistance(lat, lng, Number(settings.SchoolLat), Number(settings.SchoolLng));
+                    if (distance <= Number(settings.Radius)) {
+                        setCheckInMessage({ text: 'กำลังบันทึกข้อมูล...', type: 'loading' });
+                        const ok = await apiPost(apiUrl, { action: 'checkin', date: today, studentId: me.id, session, status: 'present', method: 'gps' });
+                        if (ok) { setCheckInMessage({ text: `✅ เช็คชื่อรอบ${session === 'am' ? 'เช้า' : 'บ่าย'} สำเร็จ!`, type: 'success' }); onRefresh(); }
+                        else setCheckInMessage({ text: '❌ เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาลองใหม่อีกครั้ง', type: 'error' });
+                    } else {
+                        setCheckInMessage({ text: `❌ คุณอยู่ห่างจากโรงเรียน ${Math.round(distance)} เมตร (ต้องอยู่ในรัศมี ${settings.Radius} เมตร)`, type: 'error' });
+                    }
+                    setIsCheckingIn(false);
+                };
+
+                if ("geolocation" in navigator) {
+                    navigator.geolocation.getCurrentPosition(
+                        (pos) => process(pos.coords.latitude, pos.coords.longitude),
+                        () => { setIsCheckingIn(false); setCheckInMessage({ text: '❌ ไม่สามารถเข้าถึง GPS ได้ กรุณากด "อนุญาต" การเข้าถึงตำแหน่ง', type: 'error' }); },
+                        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+                    );
+                } else {
+                    setIsCheckingIn(false);
+                    setCheckInMessage({ text: '❌ อุปกรณ์ไม่รองรับ GPS', type: 'error' });
+                }
+            };
+
+            const myTodayStatus = {
+                am: (attendanceMap[today] && attendanceMap[today][me.id] && attendanceMap[today][me.id].am) || null,
+                pm: (attendanceMap[today] && attendanceMap[today][me.id] && attendanceMap[today][me.id].pm) || null
+            };
+
+            return (
+                <div className="max-w-md mx-auto min-h-screen pb-16 bg-slate-50">
+                    <div className="bg-emerald-600 text-white p-6 rounded-b-[2rem] shadow-lg">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-xl font-bold">ระบบเช็คชื่อนักเรียน</h2>
+                            <div className="flex items-center gap-3">
+                                <button onClick={onRefresh} className="text-emerald-100 hover:text-white" title="รีเฟรชข้อมูล">
+                                    <i className={`fas fa-sync-alt ${refreshing ? 'animate-spin' : ''}`}></i>
+                                </button>
+                                <button onClick={onLogout} className="text-emerald-100 hover:text-white"><i className="fas fa-sign-out-alt text-xl"></i></button>
+                            </div>
+                        </div>
+                        <div className="text-center">
+                            <div className="w-20 h-20 bg-white rounded-full mx-auto flex items-center justify-center text-emerald-600 shadow-inner mb-3">
+                                <i className="fas fa-user-graduate text-3xl"></i>
+                            </div>
+                            <h3 className="text-2xl font-bold">{me.name}</h3>
+                            <p className="text-emerald-100 font-mono text-lg">{me.id}</p>
+                        </div>
+                    </div>
+
+                    <div className="p-4 space-y-4 -mt-4">
+                        <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 text-center">
+                            <h3 className="font-bold text-lg mb-1 text-slate-800">เช็คชื่อวันนี้</h3>
+                            <p className="text-xs text-slate-400 mb-4">{thaiDate(today)}</p>
+                            <div className="grid grid-cols-2 gap-3">
+                                <button onClick={() => handleCheckIn('am')} disabled={isCheckingIn || todayRec.am === 'present'}
+                                    className={`p-4 rounded-xl font-bold flex flex-col items-center justify-center gap-2 transition-all ${todayRec.am === 'present' ? 'bg-emerald-50 text-emerald-600 border border-emerald-200 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white shadow-md active:scale-95'}`}>
+                                    <i className={todayRec.am === 'present' ? "fas fa-check-circle text-2xl" : "fas fa-sun text-2xl"}></i>
+                                    <span className="text-sm">รอบเช้า<br /><span className="text-xs font-normal">({decToTime(timeToDec(settings.AmStart) - Number(settings.EarlyMinutes || 0) / 60)}-{settings.AmEnd})</span></span>
+                                </button>
+                                <button onClick={() => handleCheckIn('pm')} disabled={isCheckingIn || todayRec.pm === 'present'}
+                                    className={`p-4 rounded-xl font-bold flex flex-col items-center justify-center gap-2 transition-all ${todayRec.pm === 'present' ? 'bg-emerald-50 text-emerald-600 border border-emerald-200 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-md active:scale-95'}`}>
+                                    <i className={todayRec.pm === 'present' ? "fas fa-check-circle text-2xl" : "fas fa-cloud-sun text-2xl"}></i>
+                                    <span className="text-sm">รอบบ่าย<br /><span className="text-xs font-normal">({decToTime(timeToDec(settings.PmStart) - Number(settings.EarlyMinutes || 0) / 60)}-{settings.PmEnd})</span></span>
+                                </button>
+                            </div>
+                            {checkInMessage && (
+                                <div className={`mt-4 p-3 rounded-lg text-sm font-medium ${checkInMessage.type === 'error' ? 'bg-rose-50 text-rose-700 border border-rose-200' : checkInMessage.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-blue-50 text-blue-700 border border-blue-200'}`}>
+                                    {checkInMessage.text}
+                                </div>
+                            )}
+                        </div>
+
+                        {phaseStats.map(({ phase, stats }) => (
+                            <div key={phase.id} className={`p-5 rounded-2xl shadow-sm border ${stats.isAtRisk ? 'bg-rose-50 border-rose-100 text-rose-900' : 'bg-white border-slate-100'}`}>
+                                <div className="flex justify-between items-start mb-2">
+                                    <h4 className="font-bold text-sm"><i className="fas fa-calendar-alt mr-2"></i>{phase.name}</h4>
+                                    <span className={`font-bold text-xl ${stats.isAtRisk ? 'text-rose-600' : 'text-emerald-600'}`}>{stats.percent.toFixed(1)}%</span>
+                                </div>
+                                <div className="w-full bg-slate-200 rounded-full h-2.5 mb-3">
+                                    <div className={`h-2.5 rounded-full ${stats.isAtRisk ? 'bg-rose-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(100, stats.percent)}%` }}></div>
+                                </div>
+                                <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                                    <div className="bg-emerald-50 rounded-lg py-2"><div className="font-bold text-emerald-700 text-base">{stats.present}</div>มา (ครั้ง)</div>
+                                    <div className="bg-amber-50 rounded-lg py-2"><div className="font-bold text-amber-700 text-base">{stats.leave}</div>ลา (ครั้ง)</div>
+                                    <div className="bg-rose-50 rounded-lg py-2"><div className="font-bold text-rose-700 text-base">{stats.absent}</div>ขาด (ครั้ง)</div>
+                                </div>
+                                <p className="text-xs text-slate-500 mt-3 flex justify-between">
+                                    <span>{stats.attendedHours} / {stats.totalHours} ชม.</span>
+                                    <span>ต้องการ {phase.minPercent}%</span>
+                                </p>
+                                {stats.isAtRisk && <div className="mt-3 text-xs bg-rose-100 p-2 rounded text-rose-800"><i className="fas fa-exclamation-triangle"></i> ต่ำกว่าเกณฑ์ของช่วงนี้ ({phase.minPercent}%)</div>}
+                            </div>
+                        ))}
+
+                        <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
+                            <h4 className="font-bold text-slate-800 mb-2"><i className="fas fa-layer-group mr-2"></i>ภาพรวมทั้งหมด</h4>
+                            <p className="text-sm flex justify-between text-slate-600">
+                                <span>มา {overall.present} / ลา {overall.leave} / ขาด {overall.absent} ครั้ง</span>
+                                <span className="font-bold">{overall.percent.toFixed(1)}%</span>
+                            </p>
+                        </div>
+
+                        <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+                            <div className="px-5 pt-4 pb-3">
+                                <h4 className="font-bold text-slate-800"><i className="fas fa-calendar-check mr-2"></i>สถานะของฉันวันนี้</h4>
+                            </div>
+                            <div className="px-5 pb-5 grid grid-cols-2 gap-3">
+                                <div className="flex flex-col items-center gap-1 p-3 rounded-xl bg-slate-50 border border-slate-100">
+                                    <span className="text-xs text-slate-500">รอบเช้า</span>
+                                    <span className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border ${myTodayStatus.am ? STATUS_META[myTodayStatus.am].cls : 'bg-slate-100 text-slate-300 border-slate-200'}`}>
+                                        {myTodayStatus.am ? STATUS_META[myTodayStatus.am].short : '-'}
+                                    </span>
+                                    <span className="text-xs text-slate-400">{myTodayStatus.am ? STATUS_META[myTodayStatus.am].label : 'ยังไม่เช็คชื่อ'}</span>
+                                </div>
+                                <div className="flex flex-col items-center gap-1 p-3 rounded-xl bg-slate-50 border border-slate-100">
+                                    <span className="text-xs text-slate-500">รอบบ่าย</span>
+                                    <span className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border ${myTodayStatus.pm ? STATUS_META[myTodayStatus.pm].cls : 'bg-slate-100 text-slate-300 border-slate-200'}`}>
+                                        {myTodayStatus.pm ? STATUS_META[myTodayStatus.pm].short : '-'}
+                                    </span>
+                                    <span className="text-xs text-slate-400">{myTodayStatus.pm ? STATUS_META[myTodayStatus.pm].label : 'ยังไม่เช็คชื่อ'}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        /* ============================== TEACHER VIEW ============================== */
+        function TeacherView({ roster, settings, rawSettings, attendanceMap, apiUrl, onLogout, onRefresh, refreshing, showToast }) {
+            const [tab, setTab] = useState('attendance');
+            const [editingStudent, setEditingStudent] = useState(null);
+            const confirmArm = useConfirmArm();
+
+            const deleteStudent = async (id) => {
+                const ok = await apiPost(apiUrl, { action: 'deleteStudent', id });
+                if (ok) { showToast('🗑️ ลบนักเรียนออกจากรายชื่อแล้ว', 'success'); onRefresh(); }
+                else showToast('⚠️ ลบไม่สำเร็จ กรุณาลองใหม่', 'error');
+            };
+
+            const upsertStudent = async (data, originalId) => {
+                const cleanId = String(data.id).trim();
+                const cleanName = data.name.trim();
+                if (!cleanId || !cleanName) { showToast('⚠️ กรุณากรอกรหัสและชื่อให้ครบ', 'error'); return false; }
+                const dup = roster.find(s => s.id === cleanId && s.id !== originalId);
+                if (dup) { showToast('⚠️ มีรหัสนักเรียนนี้อยู่แล้วในระบบ', 'error'); return false; }
+                const ok = await apiPost(apiUrl, { action: 'upsertStudent', id: cleanId, name: cleanName, totalHours: '', originalId });
+                if (ok) { showToast(originalId ? '✅ บันทึกข้อมูลนักเรียนแล้ว' : '✅ เพิ่มนักเรียนใหม่แล้ว', 'success'); onRefresh(); return true; }
+                showToast('⚠️ บันทึกไม่สำเร็จ กรุณาลองใหม่', 'error');
+                return false;
+            };
+
+            return (
+                <div className="min-h-screen bg-slate-100">
+                    <header className="bg-slate-900 text-white p-4 sticky top-0 z-10 flex justify-between items-center no-print">
+                        <div className="flex items-center gap-3">
+                            <button onClick={onLogout} className="text-slate-400 hover:text-white"><i className="fas fa-sign-out-alt"></i></button>
+                            <h1 className="font-bold text-lg">{settings.CampName} (ผู้สอน)</h1>
+                        </div>
+                        <div className="flex items-center gap-4">
+                            <button onClick={onRefresh} className="text-slate-300 hover:text-white" title="รีเฟรชข้อมูล">
+                                <i className={`fas fa-sync-alt ${refreshing ? 'animate-spin' : ''}`}></i>
+                            </button>
+                            <button onClick={() => setTab('attendance')} className={tab === 'attendance' ? 'text-blue-400' : 'text-slate-400'}><i className="fas fa-clipboard-check text-xl"></i></button>
+                            <button onClick={() => setTab('reports')} className={tab === 'reports' ? 'text-blue-400' : 'text-slate-400'}><i className="fas fa-chart-bar text-xl"></i></button>
+                            <button onClick={() => setTab('diagnostics')} className={tab === 'diagnostics' ? 'text-blue-400' : 'text-slate-400'} title="ทดสอบระบบ"><i className="fas fa-vial text-xl"></i></button>
+                            <button onClick={() => setTab('settings')} className={tab === 'settings' ? 'text-blue-400' : 'text-slate-400'}><i className="fas fa-cog text-xl"></i></button>
+                        </div>
+                    </header>
+
+                    <div className="p-4 md:p-8 max-w-6xl mx-auto">
+                        {tab === 'attendance' && (
+                            <AttendanceTab roster={roster} settings={settings} attendanceMap={attendanceMap} apiUrl={apiUrl}
+                                onEdit={setEditingStudent} onAddNew={() => setEditingStudent('new')} deleteStudent={deleteStudent}
+                                confirmArm={confirmArm} showToast={showToast} onRefresh={onRefresh} />
+                        )}
+                        {tab === 'reports' && <ReportsTab roster={roster} settings={settings} attendanceMap={attendanceMap} />}
+                        {tab === 'diagnostics' && <DiagnosticsTab settings={settings} rawSettings={rawSettings} roster={roster} />}
+                        {tab === 'settings' && (
+                            <SettingsTab settings={settings} apiUrl={apiUrl} showToast={showToast} onRefresh={onRefresh} confirmArm={confirmArm} />
+                        )}
+                    </div>
+
+                    {editingStudent && (
+                        <StudentEditModal student={editingStudent === 'new' ? null : editingStudent}
+                            onClose={() => setEditingStudent(null)}
+                            onSave={async (data, originalId) => { const ok = await upsertStudent(data, originalId); if (ok) setEditingStudent(null); }} />
+                    )}
+                </div>
+            );
+        }
+
+        function AttendanceTab({ roster, settings, attendanceMap, apiUrl, onEdit, onAddNew, deleteStudent, confirmArm, showToast, onRefresh }) {
+            const [selectedDate, setSelectedDate] = useState(todayKey());
+            const [search, setSearch] = useState('');
+            const [pending, setPending] = useState({}); // `${studentId}-${session}` -> status being saved (optimistic)
+            const dayRec = attendanceMap[selectedDate] || {};
+            const isToday = selectedDate === todayKey();
+
+            const filteredRoster = useMemo(() => {
+                const q = search.trim().toLowerCase();
+                if (!q) return roster;
+                return roster.filter(s => s.id.toLowerCase().includes(q) || s.name.toLowerCase().includes(q));
+            }, [roster, search]);
+
+            const stats = useMemo(() => {
+                let full = 0, partial = 0, hasAbsentOrLeave = 0, notChecked = 0;
+                roster.forEach(s => {
+                    const r = dayRec[s.id] || {};
+                    if (r.am === 'present' && r.pm === 'present') full++;
+                    else if (r.am === 'present' || r.pm === 'present') partial++;
+                    if (r.am === 'absent' || r.pm === 'absent' || r.am === 'leave' || r.pm === 'leave') hasAbsentOrLeave++;
+                    if (!r.am && !r.pm) notChecked++;
+                });
+                return { full, partial, hasAbsentOrLeave, notChecked };
+            }, [dayRec, roster]);
+
+            const getValue = (studentId, session) => {
+                const key = `${studentId}-${session}`;
+                if (key in pending) return pending[key];
+                return (dayRec[studentId] && dayRec[studentId][session]) || null;
+            };
+            const isPending = (studentId, session) => `${studentId}-${session}` in pending;
+
+            const setStatus = async (studentId, session, status) => {
+                const key = `${studentId}-${session}`;
+                setPending(p => ({ ...p, [key]: status })); // อัปเดตหน้าจอทันที ไม่ต้องรอเซิร์ฟเวอร์
+                const ok = await apiPost(apiUrl, { action: 'setStatus', date: selectedDate, studentId, session, status, method: 'teacher' });
+                if (!ok) showToast('⚠️ บันทึกไม่สำเร็จ กรุณาลองใหม่', 'error');
+                await onRefresh();
+                setPending(p => { const n = { ...p }; delete n[key]; return n; });
+            };
+
+            const setLeaveDoc = async (studentId, session, doc) => {
+                const currentStatus = (dayRec[studentId] && dayRec[studentId][session]) || 'leave';
+                const ok = await apiPost(apiUrl, { action: 'setStatus', date: selectedDate, studentId, session, status: currentStatus, method: 'teacher', leaveDoc: doc });
+                if (ok) onRefresh(); else showToast('⚠️ บันทึกไม่สำเร็จ กรุณาลองใหม่', 'error');
+            };
+
+            return (
+                <div className="space-y-6">
+                    <div className="flex flex-wrap justify-between items-end gap-3 no-print">
+                        <div>
+                            <h2 className="text-2xl font-bold text-slate-800">เช็คชื่อ / จัดการการเข้าเรียน</h2>
+                            <div className="flex items-center gap-2 mt-2">
+                                <input type="date" value={selectedDate} onChange={e => setSelectedDate(e.target.value)} className="border border-slate-300 rounded-lg px-3 py-1.5 text-sm" />
+                                {!isToday && <span className="text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded font-medium">กำลังแก้ไขข้อมูลย้อนหลัง</span>}
+                                {isToday && <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-1 rounded font-medium">วันนี้</span>}
+                            </div>
+                        </div>
+                        <button onClick={onAddNew} className="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-emerald-700">
+                            <i className="fas fa-user-plus mr-1"></i> เพิ่มนักเรียน
+                        </button>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 no-print">
+                        <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-200">
+                            <p className="text-sm text-emerald-700">มาครบวันนี้</p>
+                            <p className="text-2xl font-bold text-emerald-800">{stats.full}</p>
+                        </div>
+                        <div className="bg-amber-50 p-4 rounded-xl border border-amber-200">
+                            <p className="text-sm text-amber-700">มาแค่ครึ่งวัน</p>
+                            <p className="text-2xl font-bold text-amber-800">{stats.partial}</p>
+                        </div>
+                        <div className="bg-rose-50 p-4 rounded-xl border border-rose-200">
+                            <p className="text-sm text-rose-700">มีรอบขาด/ลา</p>
+                            <p className="text-2xl font-bold text-rose-800">{stats.hasAbsentOrLeave}</p>
+                        </div>
+                        <div className="bg-slate-100 p-4 rounded-xl border border-slate-200">
+                            <p className="text-sm text-slate-500">ยังไม่เช็คชื่อเลย</p>
+                            <p className="text-2xl font-bold text-slate-600">{stats.notChecked}</p>
+                        </div>
+                    </div>
+
+                    <div className="relative no-print">
+                        <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm"></i>
+                        <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="ค้นหาจากรหัสหรือชื่อนักเรียน..."
+                            className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-lg text-sm" />
+                    </div>
+
+                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-left text-sm whitespace-nowrap">
+                                <thead className="bg-slate-100 border-b border-slate-200">
+                                    <tr>
+                                        <th className="p-3 font-semibold text-slate-700">รหัส</th>
+                                        <th className="p-3 font-semibold text-slate-700">ชื่อ-สกุล</th>
+                                        <th className="p-3 font-semibold text-slate-700">เช้า</th>
+                                        <th className="p-3 font-semibold text-slate-700">บ่าย</th>
+                                        <th className="p-3 font-semibold text-slate-700">หลักฐานการลา</th>
+                                        <th className="p-3 font-semibold text-slate-700 text-center">จัดการ</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {filteredRoster.length === 0 ? (
+                                        <tr><td colSpan="6" className="p-6 text-center text-slate-500">{roster.length === 0 ? 'ยังไม่มีข้อมูลนักเรียน กด "เพิ่มนักเรียน" เพื่อเริ่มต้น' : 'ไม่พบนักเรียนที่ค้นหา'}</td></tr>
+                                    ) : filteredRoster.map(s => {
+                                        const rec = dayRec[s.id] || {};
+                                        const delKey = 'del-' + s.id;
+                                        return (
+                                            <tr key={s.id} className="hover:bg-slate-50 align-top">
+                                                <td className="p-3 font-mono text-slate-600">{s.id}</td>
+                                                <td className="p-3 font-medium text-slate-900">{s.name}</td>
+                                                <td className="p-3">
+                                                    <div className="flex items-center gap-2">
+                                                        <SegmentedStatus value={getValue(s.id, 'am')} disabled={isPending(s.id, 'am')} onChange={(v) => setStatus(s.id, 'am', v)} />
+                                                        {isPending(s.id, 'am') && <i className="fas fa-circle-notch fa-spin text-slate-400 text-xs"></i>}
+                                                    </div>
+                                                </td>
+                                                <td className="p-3">
+                                                    <div className="flex items-center gap-2">
+                                                        <SegmentedStatus value={getValue(s.id, 'pm')} disabled={isPending(s.id, 'pm')} onChange={(v) => setStatus(s.id, 'pm', v)} />
+                                                        {isPending(s.id, 'pm') && <i className="fas fa-circle-notch fa-spin text-slate-400 text-xs"></i>}
+                                                    </div>
+                                                </td>
+                                                <td className="p-3 min-w-[180px]">
+                                                    {(rec.am === 'leave' || rec.pm === 'leave') ? (
+                                                        <LeaveDocInput value={rec.leaveDoc || ''} onSave={(val) => setLeaveDoc(s.id, rec.am === 'leave' ? 'am' : 'pm', val)} />
+                                                    ) : <span className="text-slate-300 text-xs">-</span>}
+                                                </td>
+                                                <td className="p-3">
+                                                    <div className="flex items-center justify-center gap-2">
+                                                        <button onClick={() => onEdit(s)} className="text-blue-600 bg-blue-50 hover:bg-blue-100 px-2.5 py-1.5 rounded-lg text-xs font-medium"><i className="fas fa-edit"></i></button>
+                                                        <button onClick={() => confirmArm.isArmed(delKey) ? deleteStudent(s.id) : confirmArm.arm(delKey)}
+                                                            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium ${confirmArm.isArmed(delKey) ? 'bg-rose-600 text-white' : 'text-rose-600 bg-rose-50 hover:bg-rose-100'}`}>
+                                                            {confirmArm.isArmed(delKey) ? 'ยืนยันลบ?' : <i className="fas fa-trash"></i>}
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function LeaveDocInput({ value, onSave }) {
+            const [local, setLocal] = useState(value);
+            useEffect(() => setLocal(value), [value]);
+            return (
+                <input type="text" value={local} onChange={e => setLocal(e.target.value)} onBlur={() => { if (local !== value) onSave(local); }}
+                    placeholder="เช่น ใบรับรองแพทย์" className="w-full p-1.5 border border-slate-300 rounded text-xs bg-amber-50" />
+            );
+        }
+
+        function StudentEditModal({ student, onClose, onSave }) {
+            const [id, setId] = useState(student ? student.id : '');
+            const [name, setName] = useState(student ? student.name : '');
+
+            return (
+                <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-4 z-50">
+                    <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl">
+                        <div className="p-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+                            <h3 className="font-bold text-slate-800 text-lg">{student ? 'แก้ไขข้อมูลนักเรียน' : 'เพิ่มนักเรียนใหม่'}</h3>
+                            <button onClick={onClose} className="text-slate-400 hover:text-rose-500"><i className="fas fa-times text-xl"></i></button>
+                        </div>
+                        <div className="p-5 space-y-4">
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">รหัสประจำตัว</label>
+                                <input type="text" value={id} onChange={e => setId(e.target.value)} className="w-full p-2 border border-slate-300 rounded bg-slate-50 text-sm" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">ชื่อ-สกุล</label>
+                                <input type="text" value={name} onChange={e => setName(e.target.value)} className="w-full p-2 border border-slate-300 rounded bg-slate-50 text-sm" />
+                            </div>
+                            <button onClick={() => onSave({ id, name }, student ? student.id : null)} className="w-full bg-blue-600 text-white font-bold p-3 rounded-xl mt-2 hover:bg-blue-700">บันทึกข้อมูล</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        /* ============================== DIAGNOSTICS / TEST TAB ============================== */
+        function DiagnosticsTab({ settings, rawSettings, roster }) {
+            const [gpsResult, setGpsResult] = useState(null);
+            const [locating, setLocating] = useState(false);
+            const [simTime, setSimTime] = useState(() => { const n = new Date(); return `${pad2(n.getHours())}:${pad2(n.getMinutes())}`; });
+            const [simDistance, setSimDistance] = useState('');
+
+            const checkSettings = rawSettings || settings;
+            const phases = parsePhases(checkSettings);
+
+            const checks = useMemo(() => {
+                const list = [];
+                ['AmStart', 'AmEnd', 'PmStart', 'PmEnd'].forEach(k => {
+                    const ok = TIME_RE.test(String(checkSettings[k]));
+                    list.push({ label: `รูปแบบเวลา ${k} ("${checkSettings[k]}")`, ok, hint: ok ? '' : 'ควรเป็น HH:MM เช่น 08:30 — ค่านี้ยังเพี้ยนอยู่ในชีต Settings จริง แม้หน้าเว็บจะใช้ค่าสำรองแทนไปก่อนแล้วก็ตาม แนะนำให้ลบชีต Settings ทิ้งแล้วให้ระบบสร้างใหม่ หรือตรวจสอบว่า Deploy เวอร์ชันล่าสุดของ Apps Script แล้วจริง' });
+                });
+                const lat = Number(checkSettings.SchoolLat), lng = Number(checkSettings.SchoolLng);
+                list.push({ label: 'พิกัดโรงเรียน (ละติจูด/ลองจิจูด)', ok: !isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0, hint: 'ควรเป็นตัวเลขจริง ไม่ใช่ 0,0' });
+                list.push({ label: 'รัศมีที่เช็คชื่อได้', ok: Number(checkSettings.Radius) > 0, hint: 'ควรมากกว่า 0 เมตร' });
+                list.push({ label: 'ชั่วโมง/รอบเช้า-บ่าย', ok: Number(checkSettings.AmHours) > 0 && Number(checkSettings.PmHours) > 0, hint: 'ควรมากกว่า 0' });
+                list.push({ label: 'ตั้งค่าช่วงเวลาการเข้าค่าย (Phases) แล้ว', ok: phases.length > 0, hint: 'ไปที่แท็บตั้งค่า เพิ่มอย่างน้อย 1 ช่วง' });
+                phases.forEach((ph) => {
+                    const validDates = !!ph.start && !!ph.end && new Date(ph.start) <= new Date(ph.end);
+                    list.push({ label: `ช่วง "${ph.name}" วันที่ถูกต้อง`, ok: validDates, hint: 'วันเริ่มต้องมาก่อนหรือเท่ากับวันสิ้นสุด' });
+                    const validPercent = Number(ph.minPercent) >= 0 && Number(ph.minPercent) <= 100;
+                    list.push({ label: `ช่วง "${ph.name}" เกณฑ์ % ถูกต้อง`, ok: validPercent, hint: 'ควรอยู่ระหว่าง 0-100' });
+                });
+                list.push({ label: 'มีรายชื่อนักเรียนในระบบ', ok: roster.length > 0, hint: 'ไปที่แท็บเช็คชื่อ กด "เพิ่มนักเรียน"' });
+                return list;
+            }, [checkSettings, roster, phases]);
+
+            const failCount = checks.filter(c => !c.ok).length;
+
+            const testMyLocation = () => {
+                if (!("geolocation" in navigator)) { setGpsResult({ error: 'อุปกรณ์นี้ไม่รองรับ GPS' }); return; }
+                setLocating(true);
+                navigator.geolocation.getCurrentPosition(
+                    (pos) => {
+                        const distance = getDistance(pos.coords.latitude, pos.coords.longitude, Number(settings.SchoolLat), Number(settings.SchoolLng));
+                        setGpsResult({ distance, withinRadius: distance <= Number(settings.Radius) });
+                        setLocating(false);
+                    },
+                    () => { setGpsResult({ error: 'ไม่สามารถเข้าถึง GPS ได้ กรุณากด "อนุญาต" การเข้าถึงตำแหน่ง' }); setLocating(false); },
+                    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+                );
+            };
+
+            const simDec = timeToDec(simTime || '00:00');
+            const early = Number(settings.EarlyMinutes || 0) / 60;
+            const amOpen = timeToDec(settings.AmStart) - early, amClose = timeToDec(settings.AmEnd);
+            const pmOpen = timeToDec(settings.PmStart) - early, pmClose = timeToDec(settings.PmEnd);
+            const amWindowOk = simDec >= amOpen && simDec <= amClose;
+            const pmWindowOk = simDec >= pmOpen && simDec <= pmClose;
+
+            const manualDistanceOk = simDistance !== '' ? Number(simDistance) <= Number(settings.Radius) : null;
+
+            return (
+                <div className="max-w-2xl space-y-6">
+                    <div className="bg-blue-50 border border-blue-200 text-blue-800 text-sm p-4 rounded-xl">
+                        <i className="fas fa-info-circle mr-1"></i> หน้านี้ใช้ตรวจสอบและจำลองการทำงานของระบบ <b>ไม่มีการบันทึกข้อมูลจริง</b> ปลอดภัยต่อการทดลองกดทุกปุ่ม
+                    </div>
+
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-xl font-bold text-slate-800"><i className="fas fa-list-check text-emerald-600 mr-2"></i>ตรวจสอบการตั้งค่า</h2>
+                            <span className={`text-xs font-bold px-2 py-1 rounded ${failCount === 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                                {failCount === 0 ? 'ผ่านทั้งหมด' : `พบปัญหา ${failCount} รายการ`}
+                            </span>
+                        </div>
+                        <div className="space-y-2">
+                            {checks.map((c, i) => (
+                                <div key={i} className={`p-3 rounded-lg text-sm flex items-start gap-2 ${c.ok ? 'bg-emerald-50' : 'bg-rose-50'}`}>
+                                    <i className={`fas ${c.ok ? 'fa-check-circle text-emerald-600' : 'fa-times-circle text-rose-600'} mt-0.5`}></i>
+                                    <div>
+                                        <div className={c.ok ? 'text-emerald-800' : 'text-rose-800 font-medium'}>{c.label}</div>
+                                        {!c.ok && <div className="text-rose-600 text-xs mt-0.5">{c.hint}</div>}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                        {failCount > 0 && (
+                            <p className="text-xs text-slate-400 mt-3">หมายเหตุ: หน้าเช็คชื่อของนักเรียน/ครูจะไม่แสดงค่าที่เพี้ยนเหล่านี้ให้เห็น (ใช้ค่าสำรองแทนไปก่อนอัตโนมัติ) แต่ควรแก้ที่ต้นทางในชีตให้เรียบร้อยเพื่อความถูกต้อง</p>
+                        )}
+                    </div>
+
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h2 className="text-xl font-bold text-slate-800 mb-2"><i className="fas fa-location-crosshairs text-blue-600 mr-2"></i>จำลองการเช็คชื่อด้วย GPS จริง</h2>
+                        <p className="text-sm text-slate-500 mb-4">กดทดสอบตำแหน่งปัจจุบันของอุปกรณ์นี้เทียบกับพิกัดโรงเรียนที่ตั้งไว้ (ไม่บันทึกจริง)</p>
+                        <button onClick={testMyLocation} disabled={locating} className="w-full bg-blue-600 text-white p-3 rounded-lg font-medium disabled:opacity-50 mb-4">
+                            {locating ? 'กำลังดึงตำแหน่ง...' : 'ทดสอบตำแหน่งปัจจุบันของฉัน'}
+                        </button>
+                        {gpsResult && gpsResult.error && (
+                            <div className="bg-rose-50 text-rose-700 p-3 rounded-lg text-sm">{gpsResult.error}</div>
+                        )}
+                        {gpsResult && !gpsResult.error && (
+                            <div className={`p-4 rounded-lg text-sm ${gpsResult.withinRadius ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`}>
+                                <p>ระยะห่างจากโรงเรียน: <b>{Math.round(gpsResult.distance)} เมตร</b> (รัศมีที่กำหนด {settings.Radius} เมตร)</p>
+                                <p className="mt-1 font-bold">{gpsResult.withinRadius ? '✅ อยู่ในระยะที่เช็คชื่อได้' : '❌ อยู่นอกระยะที่เช็คชื่อได้'}</p>
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h2 className="text-xl font-bold text-slate-800 mb-2"><i className="fas fa-ruler text-indigo-600 mr-2"></i>จำลองระยะห่างเอง (ไม่ต้องเดินไปจริง)</h2>
+                        <p className="text-sm text-slate-500 mb-4">ใส่ระยะห่างสมมติจากโรงเรียน (เมตร) เพื่อดูว่าถ้าอยู่ไกลขนาดนี้จะเช็คชื่อได้หรือไม่ — ใช้ทดสอบกรณี "อยู่นอกพื้นที่" ได้โดยไม่ต้องเดินออกไปจริง</p>
+                        <div className="flex gap-2">
+                            <input type="number" min="0" value={simDistance} onChange={e => setSimDistance(e.target.value)} placeholder="เช่น 800" className="flex-1 p-2 border border-slate-300 rounded text-sm" />
+                            <span className="flex items-center text-sm text-slate-500">เมตร</span>
+                        </div>
+                        {manualDistanceOk !== null && (
+                            <div className={`mt-3 p-3 rounded-lg text-sm font-bold ${manualDistanceOk ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`}>
+                                {manualDistanceOk ? `✅ อยู่ในระยะ (รัศมี ${settings.Radius} เมตร) — เช็คชื่อได้` : `❌ เกินระยะ (รัศมี ${settings.Radius} เมตร) — เช็คชื่อไม่ได้`}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h2 className="text-xl font-bold text-slate-800 mb-2"><i className="fas fa-clock text-amber-600 mr-2"></i>จำลองช่วงเวลาเช็คชื่อ</h2>
+                        <p className="text-sm text-slate-500 mb-4">ลองใส่เวลาสมมติ ดูว่าช่วงเวลานั้นเปิดให้เช็คชื่อรอบไหนได้บ้าง (ตามเกณฑ์เวลาที่ตั้งไว้ในแท็บตั้งค่า)</p>
+                        <input type="time" value={simTime} onChange={e => setSimTime(e.target.value)} className="w-full p-2 border border-slate-300 rounded text-sm mb-4" />
+                        <div className="grid grid-cols-2 gap-3">
+                            <div className={`p-3 rounded-lg text-center text-sm font-medium ${amWindowOk ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-400'}`}>
+                                รอบเช้า {amWindowOk ? '✅ เปิด' : '❌ ปิด'}<br /><span className="text-xs font-normal">({decToTimeSafe(amOpen)}-{settings.AmEnd})</span>
+                            </div>
+                            <div className={`p-3 rounded-lg text-center text-sm font-medium ${pmWindowOk ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-400'}`}>
+                                รอบบ่าย {pmWindowOk ? '✅ เปิด' : '❌ ปิด'}<br /><span className="text-xs font-normal">({decToTimeSafe(pmOpen)}-{settings.PmEnd})</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+        const decToTimeSafe = (dec) => { const h = Math.floor(((dec % 24) + 24) % 24); const m = Math.round((dec - Math.floor(dec)) * 60); return `${pad2(h)}:${pad2(m)}`; };
+
+
+        function ReportsTab({ roster, settings, attendanceMap }) {
+            const [view, setView] = useState('summary');
+            const [onlyAtRisk, setOnlyAtRisk] = useState(false);
+            const [search, setSearch] = useState('');
+            const phases = parsePhases(settings);
+
+            const rows = useMemo(() => {
+                return roster.map(s => {
+                    const perPhase = phases.map(ph => computePhaseStats(s.id, ph, attendanceMap, settings));
+                    const overall = computeOverallStats(s.id, phases, attendanceMap, settings);
+                    const anyAtRisk = perPhase.some(p => p.isAtRisk);
+                    return { ...s, perPhase, overall, anyAtRisk };
+                }).sort((a, b) => a.overall.percent - b.overall.percent);
+            }, [roster, attendanceMap, settings, phases]);
+
+            const visibleRows = useMemo(() => {
+                let r = onlyAtRisk ? rows.filter(r => r.anyAtRisk) : rows;
+                const q = search.trim().toLowerCase();
+                if (q) r = r.filter(x => x.id.toLowerCase().includes(q) || x.name.toLowerCase().includes(q));
+                return r;
+            }, [rows, onlyAtRisk, search]);
+
+            const exportExcel = () => {
+                const data = rows.map((r, i) => {
+                    const row = { 'ลำดับ': i + 1, 'รหัส': r.id, 'ชื่อ-สกุล': r.name };
+                    r.perPhase.forEach((p, idx) => {
+                        row[`${phases[idx].name} - มา`] = p.present;
+                        row[`${phases[idx].name} - ลา`] = p.leave;
+                        row[`${phases[idx].name} - ขาด`] = p.absent;
+                        row[`${phases[idx].name} - %`] = Number(p.percent.toFixed(1));
+                    });
+                    row['รวมทั้งหมด %'] = Number(r.overall.percent.toFixed(1));
+                    row['สถานะ'] = r.anyAtRisk ? 'เสี่ยงหมดสิทธิ์สอบ' : 'ผ่านเกณฑ์';
+                    return row;
+                });
+                const ws = XLSX.utils.json_to_sheet(data);
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, 'รายงาน');
+                XLSX.writeFile(wb, `รายงานเข้าเรียน_${todayKey()}.xlsx`);
+            };
+
+            return (
+                <div className="space-y-6">
+                    <div className="flex gap-2 no-print">
+                        <button onClick={() => setView('summary')} className={`px-4 py-2 rounded-lg text-sm font-medium ${view === 'summary' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-300 text-slate-600'}`}>สรุปทั้งหมด</button>
+                        <button onClick={() => setView('daily')} className={`px-4 py-2 rounded-lg text-sm font-medium ${view === 'daily' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-300 text-slate-600'}`}>รายงานรายวัน (สำหรับเบิกจ่าย)</button>
+                    </div>
+
+                    {view === 'daily' ? (
+                        <DailyReport roster={roster} settings={settings} attendanceMap={attendanceMap} />
+                    ) : (
+                    <React.Fragment>
+                    <div className="print-header">
+                        <h2 className="text-xl font-bold mb-1">รายงานสรุปการเข้าเรียน {settings.CampName}</h2>
+                        <p>ข้อมูล ณ วันที่ {thaiDate(todayKey())}</p>
+                    </div>
+                    <div className="flex flex-wrap justify-between items-end gap-3 no-print">
+                        <div>
+                            <h2 className="text-2xl font-bold text-slate-800">รายงานสรุปการเข้าเรียน</h2>
+                            <label className="flex items-center gap-2 mt-2 text-sm text-slate-600">
+                                <input type="checkbox" checked={onlyAtRisk} onChange={e => setOnlyAtRisk(e.target.checked)} />
+                                แสดงเฉพาะนักเรียนที่มีช่วงใดช่วงหนึ่งไม่ครบเกณฑ์
+                            </label>
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={exportExcel} className="bg-emerald-600 text-white px-3 py-2 rounded-lg text-sm font-medium hover:bg-emerald-700"><i className="fas fa-file-excel"></i> ส่งออก Excel</button>
+                            <button onClick={() => window.print()} className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700"><i className="fas fa-print"></i> พิมพ์ / PDF</button>
+                        </div>
+                    </div>
+                    {phases.length === 0 && (
+                        <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm p-4 rounded-xl no-print">
+                            ยังไม่ได้ตั้งค่าช่วงเวลาการเข้าค่าย (Phases) กรุณาไปที่แท็บตั้งค่าเพื่อเพิ่มช่วงเวลาก่อน
+                        </div>
+                    )}
+                    <div className="relative no-print">
+                        <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm"></i>
+                        <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="ค้นหาจากรหัสหรือชื่อนักเรียน..."
+                            className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-lg text-sm" />
+                    </div>
+                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden print-area">
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-left text-sm whitespace-nowrap">
+                                <thead className="bg-slate-100 border-b border-slate-200">
+                                    <tr>
+                                        <th className="p-3 font-semibold text-slate-700">ที่</th>
+                                        <th className="p-3 font-semibold text-slate-700">รหัส</th>
+                                        <th className="p-3 font-semibold text-slate-700">ชื่อ-สกุล</th>
+                                        {phases.map(ph => (
+                                            <th key={ph.id} className="p-3 font-semibold text-slate-700 text-center">{ph.name}<br /><span className="font-normal text-xs text-slate-400">(ต้องการ {ph.minPercent}%)</span></th>
+                                        ))}
+                                        <th className="p-3 font-semibold text-slate-700 text-center">รวมทั้งหมด</th>
+                                        <th className="p-3 font-semibold text-slate-700 text-center">สถานะ</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {visibleRows.length === 0 ? (
+                                        <tr><td colSpan={4 + phases.length} className="p-6 text-center text-slate-500">ไม่มีข้อมูล</td></tr>
+                                    ) : visibleRows.map((r, i) => (
+                                        <tr key={r.id} className={r.anyAtRisk ? 'bg-rose-50' : ''}>
+                                            <td className="p-3">{i + 1}</td>
+                                            <td className="p-3 font-mono text-slate-600">{r.id}</td>
+                                            <td className="p-3 font-medium text-slate-900">{r.name}</td>
+                                            {r.perPhase.map((p, idx) => (
+                                                <td key={idx} className="p-3 text-center">
+                                                    <div className={`font-bold ${p.isAtRisk ? 'text-rose-600' : 'text-emerald-600'}`}>{p.percent.toFixed(1)}%</div>
+                                                    <div className="text-[11px] text-slate-400">ม.{p.present} ล.{p.leave} ข.{p.absent}</div>
+                                                </td>
+                                            ))}
+                                            <td className="p-3 text-center font-bold">{r.overall.percent.toFixed(1)}%</td>
+                                            <td className="p-3 text-center">
+                                                {r.anyAtRisk ? <span className="bg-rose-100 text-rose-700 px-2 py-1 rounded text-xs font-bold">เสี่ยงหมดสิทธิ์สอบ</span>
+                                                    : <span className="bg-emerald-100 text-emerald-700 px-2 py-1 rounded text-xs font-bold">ผ่านเกณฑ์</span>}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    </React.Fragment>
+                    )}
+                </div>
+            );
+        }
+
+        /* ============================== DAILY REPORT (FOR REIMBURSEMENT) ============================== */
+        function DailyReport({ roster, settings, attendanceMap }) {
+            const [selectedDate, setSelectedDate] = useState(todayKey());
+            const [demoMode, setDemoMode] = useState(false);
+            const dayRec = attendanceMap[selectedDate] || {};
+
+            // โหมดจำลอง: สุ่มสถานะแบบตายตัว (ไม่สุ่มใหม่ทุกครั้ง) เพื่อดูตัวอย่างหน้าตาเอกสาร ไม่บันทึกข้อมูลจริง
+            const demoStatusFor = (idx, offset) => {
+                const seed = (idx * 7 + offset) % 10;
+                if (seed < 7) return 'present';
+                if (seed < 9) return 'leave';
+                return 'absent';
+            };
+
+            const rows = useMemo(() => {
+                return roster.map((s, i) => {
+                    if (demoMode) {
+                        return { no: i + 1, id: s.id, name: s.name, am: demoStatusFor(i, 0), pm: demoStatusFor(i, 3), leaveDoc: demoStatusFor(i, 0) === 'leave' ? 'ตัวอย่าง: ใบรับรองแพทย์' : '' };
+                    }
+                    return {
+                        no: i + 1, id: s.id, name: s.name,
+                        am: (dayRec[s.id] && dayRec[s.id].am) || null,
+                        pm: (dayRec[s.id] && dayRec[s.id].pm) || null,
+                        leaveDoc: (dayRec[s.id] && dayRec[s.id].leaveDoc) || ''
+                    };
+                });
+            }, [roster, dayRec, demoMode]);
+
+            const summary = useMemo(() => {
+                let amPresent = 0, amAbsent = 0, amLeave = 0, pmPresent = 0, pmAbsent = 0, pmLeave = 0;
+                rows.forEach(r => {
+                    if (r.am === 'present') amPresent++; else if (r.am === 'leave') amLeave++; else amAbsent++;
+                    if (r.pm === 'present') pmPresent++; else if (r.pm === 'leave') pmLeave++; else pmAbsent++;
+                });
+                return { amPresent, amAbsent, amLeave, pmPresent, pmAbsent, pmLeave };
+            }, [rows]);
+
+            const label = (st) => st ? STATUS_META[st].label : 'ขาด';
+
+            const exportExcel = () => {
+                const data = rows.map(r => ({
+                    'ลำดับ': r.no, 'รหัส': r.id, 'ชื่อ-สกุล': r.name,
+                    'รอบเช้า': label(r.am), 'รอบบ่าย': label(r.pm), 'หมายเหตุ/หลักฐานการลา': r.leaveDoc
+                }));
+                data.push({});
+                data.push({ 'ลำดับ': 'ลงชื่อ..................................................ผู้รับรอง' });
+                data.push({ 'ลำดับ': settings.CertifierName ? `(${settings.CertifierName})` : '(..................................................)' });
+                data.push({ 'ลำดับ': `ตำแหน่ง ${settings.CertifierPosition || '..................................................'}` });
+                data.push({ 'ลำดับ': 'วันที่.............เดือน..............................พ.ศ..............' });
+                const ws = XLSX.utils.json_to_sheet(data);
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, 'รายงานรายวัน');
+                XLSX.writeFile(wb, `รายงานรายวัน_${selectedDate}${demoMode ? '_ตัวอย่าง' : ''}.xlsx`);
+            };
+
+            // ส่งออกเป็น Word (.doc) จริง เปิดแก้ไขต่อใน Microsoft Word / Google Docs ได้เลย
+            // ใช้เทคนิคตาราง 2 คอลัมน์ซ้อนกัน (ตารางใหญ่ 1 แถว 2 ช่อง แต่ละช่องมีตารางย่อยของตัวเอง)
+            // เพราะ Word ไม่รองรับ CSS column-count แต่รองรับตารางซ้อนตารางได้ดีมาก ช่วยให้พอดี 2 หน้าแม้ใช้ฟอนต์ 16pt
+            const exportWord = () => {
+                const FONT = `'TH SarabunIT๙','TH Sarabun New','Sarabun',sans-serif`;
+                const tableRows = rows.map(r => `
+                    <tr>
+                        <td style="border:1px solid #999;padding:4px 6px;text-align:center;">${r.no}</td>
+                        <td style="border:1px solid #999;padding:4px 6px;">${r.id}</td>
+                        <td style="border:1px solid #999;padding:4px 6px;">${r.name}</td>
+                        <td style="border:1px solid #999;padding:4px 6px;text-align:center;">${label(r.am)}</td>
+                        <td style="border:1px solid #999;padding:4px 6px;text-align:center;">${label(r.pm)}</td>
+                        <td style="border:1px solid #999;padding:4px 6px;">${r.leaveDoc || ''}</td>
+                    </tr>`).join('');
+
+                const certName = settings.CertifierName ? `(${settings.CertifierName})` : '(..................................................)';
+                const certPosition = settings.CertifierPosition ? settings.CertifierPosition : '..................................................';
+
+                const html = `
+                <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+                <head>
+                    <meta charset="utf-8">
+                    <title>รายงานรายวัน</title>
+                    <style>
+                        @page Section1 { size: 21cm 29.7cm; margin: 1.5cm 1.2cm 1.5cm 1.2cm; mso-header-margin: .5in; mso-footer-margin: .5in; mso-paper-source: 0; }
+                        div.Section1 { page: Section1; }
+                        body { font-family: ${FONT}; font-size: 16pt; }
+                    </style>
+                </head>
+                <body>
+                    <div class="Section1">
+                        <h2 style="text-align:center;margin-bottom:4px;font-family:${FONT};">รายงานเช็คชื่อรายวัน ${settings.CampName}</h2>
+                        <p style="text-align:center;margin-top:0;">วันที่ ${thaiDate(selectedDate)}${demoMode ? ' (ตัวอย่าง/ข้อมูลจำลอง)' : ''}</p>
+                        <p>รอบเช้า: มา ${summary.amPresent} / ลา ${summary.amLeave} / ขาด ${summary.amAbsent} คน &nbsp;&nbsp; รอบบ่าย: มา ${summary.pmPresent} / ลา ${summary.pmLeave} / ขาด ${summary.pmAbsent} คน &nbsp;&nbsp; รวมทั้งหมด ${roster.length} คน</p>
+                        <table style="border-collapse:collapse;width:100%;">
+                            <thead>
+                                <tr style="background:#f1f5f9;">
+                                    <th style="border:1px solid #999;padding:4px 6px;">ที่</th>
+                                    <th style="border:1px solid #999;padding:4px 6px;">รหัส</th>
+                                    <th style="border:1px solid #999;padding:4px 6px;">ชื่อ-สกุล</th>
+                                    <th style="border:1px solid #999;padding:4px 6px;">รอบเช้า</th>
+                                    <th style="border:1px solid #999;padding:4px 6px;">รอบบ่าย</th>
+                                    <th style="border:1px solid #999;padding:4px 6px;">หมายเหตุ / หลักฐานการลา</th>
+                                </tr>
+                            </thead>
+                            <tbody>${tableRows}</tbody>
+                        </table>
+                        <br/>
+                        <table style="width:60%;margin-left:auto;margin-right:auto;">
+                            <tr><td style="text-align:center;padding-top:20px;">ลงชื่อ..................................................ผู้รับรอง</td></tr>
+                            <tr><td style="text-align:center;padding-top:10px;">${certName}</td></tr>
+                            <tr><td style="text-align:center;padding-top:10px;">ตำแหน่ง ${certPosition}</td></tr>
+                            <tr><td style="text-align:center;padding-top:10px;">วันที่.............เดือน..............................พ.ศ..............</td></tr>
+                        </table>
+                    </div>
+                </body>
+                </html>`;
+
+                const blob = new Blob(['\ufeff', html], { type: 'application/msword' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `รายงานรายวัน_${selectedDate}${demoMode ? '_ตัวอย่าง' : ''}.doc`;
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+
+            return (
+                <div className="space-y-6">
+                    <div className="print-header">
+                        <h2 className="text-xl font-bold mb-1">รายงานเช็คชื่อรายวัน {settings.CampName}</h2>
+                        <p>วันที่ {thaiDate(selectedDate)}{demoMode ? ' (ตัวอย่าง/ข้อมูลจำลอง)' : ''}</p>
+                    </div>
+                    <div className="flex flex-wrap justify-between items-end gap-3 no-print">
+                        <div>
+                            <h2 className="text-2xl font-bold text-slate-800">รายงานเช็คชื่อรายวัน</h2>
+                            <div className="flex items-center gap-3 mt-2 flex-wrap">
+                                <input type="date" value={selectedDate} onChange={e => setSelectedDate(e.target.value)} className="border border-slate-300 rounded-lg px-3 py-1.5 text-sm" />
+                                <label className="flex items-center gap-2 text-sm text-slate-600">
+                                    <input type="checkbox" checked={demoMode} onChange={e => setDemoMode(e.target.checked)} />
+                                    ดูตัวอย่างด้วยข้อมูลจำลอง (ยังไม่ต้องมีข้อมูลจริง)
+                                </label>
+                            </div>
+                        </div>
+                        <div className="flex gap-2 flex-wrap">
+                            <button onClick={exportExcel} className="bg-emerald-600 text-white px-3 py-2 rounded-lg text-sm font-medium hover:bg-emerald-700"><i className="fas fa-file-excel"></i> Excel</button>
+                            <button onClick={exportWord} className="bg-indigo-600 text-white px-3 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700"><i className="fas fa-file-word"></i> Word</button>
+                            <button onClick={() => window.print()} className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700"><i className="fas fa-print"></i> พิมพ์ / PDF</button>
+                        </div>
+                    </div>
+                    {demoMode && (
+                        <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm p-3 rounded-xl no-print">
+                            <i className="fas fa-flask mr-1"></i> กำลังแสดงข้อมูลจำลองเพื่อดูตัวอย่างหน้าตาเอกสารเท่านั้น ไม่ใช่ข้อมูลจริง และจะไม่ถูกบันทึกที่ใด
+                        </div>
+                    )}
+
+                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden print-area daily-report-print">
+                        <div className="p-4 border-b border-slate-100 text-sm text-slate-600 flex flex-wrap gap-x-6 gap-y-1">
+                            <span>รอบเช้า: มา {summary.amPresent} / ลา {summary.amLeave} / ขาด {summary.amAbsent} คน</span>
+                            <span>รอบบ่าย: มา {summary.pmPresent} / ลา {summary.pmLeave} / ขาด {summary.pmAbsent} คน</span>
+                            <span>รวมทั้งหมด {roster.length} คน</span>
+                        </div>
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-left text-sm whitespace-nowrap">
+                                <thead className="bg-slate-100 border-b border-slate-200">
+                                    <tr>
+                                        <th className="p-3 font-semibold text-slate-700">ที่</th>
+                                        <th className="p-3 font-semibold text-slate-700">รหัส</th>
+                                        <th className="p-3 font-semibold text-slate-700">ชื่อ-สกุล</th>
+                                        <th className="p-3 font-semibold text-slate-700 text-center">รอบเช้า</th>
+                                        <th className="p-3 font-semibold text-slate-700 text-center">รอบบ่าย</th>
+                                        <th className="p-3 font-semibold text-slate-700">หมายเหตุ / หลักฐานการลา</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {roster.length === 0 ? (
+                                        <tr><td colSpan="6" className="p-6 text-center text-slate-500">ยังไม่มีข้อมูลนักเรียน ไปที่แท็บเช็คชื่อเพื่อเพิ่มนักเรียนก่อน</td></tr>
+                                    ) : rows.map(r => (
+                                        <tr key={r.id} className="compact-row">
+                                            <td className="p-3">{r.no}</td>
+                                            <td className="p-3 font-mono text-slate-600">{r.id}</td>
+                                            <td className="p-3 font-medium text-slate-900">{r.name}</td>
+                                            <td className="p-3 text-center">
+                                                <span className={`px-2 py-1 rounded text-xs font-bold border ${r.am ? STATUS_META[r.am].cls : 'bg-rose-100 text-rose-700 border-rose-200'}`}>{label(r.am)}</span>
+                                            </td>
+                                            <td className="p-3 text-center">
+                                                <span className={`px-2 py-1 rounded text-xs font-bold border ${r.pm ? STATUS_META[r.pm].cls : 'bg-rose-100 text-rose-700 border-rose-200'}`}>{label(r.pm)}</span>
+                                            </td>
+                                            <td className="p-3 text-slate-500">{r.leaveDoc || '-'}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <div className="p-8 flex justify-center" style={{ fontSize: '16pt', fontFamily: "'TH SarabunIT๙','TH Sarabun New','Sarabun',sans-serif" }}>
+                            <div className="text-center w-full sm:w-1/2">
+                                <p>ลงชื่อ..................................................ผู้รับรอง</p>
+                                <p className="mt-3">{settings.CertifierName ? `(${settings.CertifierName})` : '(..................................................)'}</p>
+                                <p className="mt-3">ตำแหน่ง {settings.CertifierPosition || '..................................................'}</p>
+                                <p className="mt-3">วันที่.............เดือน..............................พ.ศ..............</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        /* ============================== SETTINGS TAB ============================== */
+        function SettingsTab({ settings, apiUrl, showToast, onRefresh, confirmArm }) {
+            const [form, setForm] = useState({
+                CampName: settings.CampName, SchoolLat: settings.SchoolLat, SchoolLng: settings.SchoolLng, Radius: settings.Radius,
+                AmStart: settings.AmStart, AmEnd: settings.AmEnd, PmStart: settings.PmStart, PmEnd: settings.PmEnd,
+                AmHours: settings.AmHours, PmHours: settings.PmHours, EarlyMinutes: settings.EarlyMinutes
+            });
+            const [certifierName, setCertifierName] = useState(settings.CertifierName || '');
+            const [certifierPosition, setCertifierPosition] = useState(settings.CertifierPosition || '');
+            const [phases, setPhases] = useState(parsePhases(settings));
+            const [locating, setLocating] = useState(false);
+            const [currentPin, setCurrentPin] = useState('');
+            const [newPin, setNewPin] = useState('');
+            const [confirmPin, setConfirmPin] = useState('');
+            const [copyLabel, setCopyLabel] = useState('คัดลอกลิงก์');
+
+            const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+
+            const handleSaveParams = async () => {
+                const ok = await apiPost(apiUrl, { action: 'updateSettings', settings: form });
+                if (ok) { showToast('✅ บันทึกการตั้งค่าแล้ว', 'success'); onRefresh(); }
+                else showToast('⚠️ บันทึกไม่สำเร็จ', 'error');
+            };
+
+            const handleSaveCertifier = async () => {
+                const ok = await apiPost(apiUrl, { action: 'updateSettings', settings: { CertifierName: certifierName, CertifierPosition: certifierPosition } });
+                if (ok) { showToast('✅ บันทึกข้อมูลผู้รับรองแล้ว', 'success'); onRefresh(); }
+                else showToast('⚠️ บันทึกไม่สำเร็จ', 'error');
+            };
+
+            const handleUseMyLocation = () => {
+                if (!("geolocation" in navigator)) { showToast('❌ อุปกรณ์นี้ไม่รองรับ GPS', 'error'); return; }
+                setLocating(true);
+                navigator.geolocation.getCurrentPosition(
+                    (pos) => {
+                        setForm(f => ({ ...f, SchoolLat: pos.coords.latitude.toFixed(6), SchoolLng: pos.coords.longitude.toFixed(6) }));
+                        showToast('📍 ดึงพิกัดปัจจุบันมาใส่แล้ว อย่าลืมกด "บันทึกการตั้งค่า" ด้านล่าง', 'success');
+                        setLocating(false);
+                    },
+                    () => { showToast('❌ ไม่สามารถเข้าถึง GPS ได้ กรุณากด "อนุญาต" การเข้าถึงตำแหน่ง', 'error'); setLocating(false); },
+                    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+                );
+            };
+
+            const updatePhase = (idx, key, value) => {
+                setPhases(prev => prev.map((p, i) => i === idx ? { ...p, [key]: value } : p));
+            };
+            const addPhase = () => {
+                setPhases(prev => [...prev, { id: 'p' + (Date.now()), name: `ช่วงที่ ${prev.length + 1}`, start: todayKey(), end: todayKey(), minPercent: 80 }]);
+            };
+            const removePhase = (idx) => setPhases(prev => prev.filter((_, i) => i !== idx));
+            const handleSavePhases = async () => {
+                const ok = await apiPost(apiUrl, { action: 'updateSettings', settings: { Phases: JSON.stringify(phases) } });
+                if (ok) { showToast('✅ บันทึกช่วงเวลาการเข้าค่ายแล้ว', 'success'); onRefresh(); }
+                else showToast('⚠️ บันทึกไม่สำเร็จ', 'error');
+            };
+
+            const handleChangePin = async () => {
+                if (currentPin !== String(settings.TeacherPin)) { showToast('❌ รหัสผ่านปัจจุบันไม่ถูกต้อง', 'error'); return; }
+                if (!newPin || newPin.length < 4) { showToast('⚠️ รหัสผ่านใหม่ควรมีอย่างน้อย 4 หลัก', 'error'); return; }
+                if (newPin !== confirmPin) { showToast('⚠️ รหัสผ่านใหม่ไม่ตรงกัน', 'error'); return; }
+                const ok = await apiPost(apiUrl, { action: 'updateSettings', settings: { TeacherPin: newPin } });
+                if (ok) { showToast('✅ เปลี่ยนรหัสผ่านแล้ว', 'success'); setCurrentPin(''); setNewPin(''); setConfirmPin(''); onRefresh(); }
+                else showToast('⚠️ เปลี่ยนรหัสผ่านไม่สำเร็จ', 'error');
+            };
+
+            const shareLink = `${window.location.origin}${window.location.pathname}?api=${encodeURIComponent(apiUrl)}`;
+            const copyLink = () => {
+                navigator.clipboard.writeText(shareLink).then(() => {
+                    setCopyLabel('คัดลอกแล้ว ✓');
+                    setTimeout(() => setCopyLabel('คัดลอกลิงก์'), 2000);
+                });
+            };
+
+            return (
+                <div className="max-w-2xl space-y-6">
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h2 className="text-xl font-bold text-slate-800 mb-2"><i className="fas fa-share-alt text-emerald-600 mr-2"></i>ลิงก์สำหรับแจกนักเรียน</h2>
+                        <p className="text-sm text-slate-500 mb-3">แจกลิงก์นี้ให้นักเรียน ทุกคนจะเชื่อมกับฐานข้อมูลเดียวกันโดยอัตโนมัติ ไม่ต้องตั้งค่าเอง</p>
+                        <div className="flex gap-2">
+                            <input readOnly value={shareLink} className="flex-1 p-2 border border-slate-300 rounded bg-slate-50 text-xs font-mono" onFocus={e => e.target.select()} />
+                            <button onClick={copyLink} className="bg-emerald-600 text-white px-4 rounded-lg text-sm font-medium whitespace-nowrap">{copyLabel}</button>
+                        </div>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h2 className="text-xl font-bold text-slate-800 mb-4"><i className="fas fa-calendar-week text-indigo-600 mr-2"></i>ช่วงเวลาการเข้าค่ายและเกณฑ์แต่ละช่วง</h2>
+                        <p className="text-sm text-slate-500 mb-4">แต่ละช่วงมีวันเริ่ม-สิ้นสุด และเกณฑ์ขั้นต่ำ (%) เป็นของตัวเอง เช่น ช่วงแรกต้องมา 80% ช่วงหลังต้องมา 100%</p>
+                        <div className="space-y-3">
+                            {phases.map((ph, idx) => (
+                                <div key={ph.id} className="border border-slate-200 rounded-xl p-4 space-y-2">
+                                    <div className="flex items-center gap-2">
+                                        <input type="text" value={ph.name} onChange={e => updatePhase(idx, 'name', e.target.value)} placeholder="ชื่อช่วง เช่น ช่วงที่ 1" className="flex-1 p-2 border border-slate-300 rounded text-sm font-medium" />
+                                        <button onClick={() => removePhase(idx)} className="text-rose-500 hover:bg-rose-50 w-9 h-9 rounded-lg flex items-center justify-center"><i className="fas fa-trash"></i></button>
+                                    </div>
+                                    <div className="grid grid-cols-3 gap-2">
+                                        <div>
+                                            <label className="block text-[11px] text-slate-400 mb-1">วันเริ่ม</label>
+                                            <input type="date" value={ph.start} onChange={e => updatePhase(idx, 'start', e.target.value)} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[11px] text-slate-400 mb-1">วันสิ้นสุด</label>
+                                            <input type="date" value={ph.end} onChange={e => updatePhase(idx, 'end', e.target.value)} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[11px] text-slate-400 mb-1">เกณฑ์ขั้นต่ำ (%)</label>
+                                            <input type="number" min="0" max="100" value={ph.minPercent} onChange={e => updatePhase(idx, 'minPercent', Number(e.target.value))} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                        <button onClick={addPhase} className="w-full mt-3 border-2 border-dashed border-slate-300 text-slate-500 p-2.5 rounded-xl text-sm font-medium hover:bg-slate-50">
+                            <i className="fas fa-plus mr-1"></i> เพิ่มช่วงเวลา
+                        </button>
+                        <button onClick={handleSavePhases} className="w-full bg-indigo-600 text-white p-3 rounded-lg font-medium mt-4">บันทึกช่วงเวลาการเข้าค่าย</button>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h2 className="text-xl font-bold text-slate-800 mb-4"><i className="fas fa-sliders-h text-blue-600 mr-2"></i>ตั้งค่าค่ายและเงื่อนไขการเช็คชื่อ</h2>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div className="sm:col-span-2">
+                                <label className="block text-xs font-bold text-slate-500 mb-1">ชื่อค่าย</label>
+                                <input type="text" value={form.CampName} onChange={set('CampName')} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                            </div>
+                            <div className="sm:col-span-2">
+                                <button onClick={handleUseMyLocation} disabled={locating} className="w-full bg-blue-50 text-blue-700 border border-blue-200 p-2.5 rounded-lg text-sm font-medium disabled:opacity-50">
+                                    <i className={`fas ${locating ? 'fa-spinner fa-spin' : 'fa-location-crosshairs'} mr-1`}></i> {locating ? 'กำลังดึงตำแหน่ง...' : 'ใช้ตำแหน่งปัจจุบันของฉัน (ต้องยืนอยู่ที่โรงเรียน)'}
+                                </button>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">ละติจูดโรงเรียน</label>
+                                <input type="number" step="any" value={form.SchoolLat} onChange={set('SchoolLat')} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">ลองจิจูดโรงเรียน</label>
+                                <input type="number" step="any" value={form.SchoolLng} onChange={set('SchoolLng')} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">รัศมีที่เช็คชื่อได้ (เมตร)</label>
+                                <input type="number" value={form.Radius} onChange={set('Radius')} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">เปิดให้เช็คชื่อล่วงหน้าก่อนเวลาเริ่ม (นาที)</label>
+                                <input type="number" min="0" step="5" value={form.EarlyMinutes} onChange={set('EarlyMinutes')} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">เวลาเริ่ม-สิ้นสุด รอบเช้า</label>
+                                <div className="flex gap-2">
+                                    <input type="time" value={form.AmStart} onChange={set('AmStart')} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                                    <input type="time" value={form.AmEnd} onChange={set('AmEnd')} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">เวลาเริ่ม-สิ้นสุด รอบบ่าย</label>
+                                <div className="flex gap-2">
+                                    <input type="time" value={form.PmStart} onChange={set('PmStart')} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                                    <input type="time" value={form.PmEnd} onChange={set('PmEnd')} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">ชั่วโมง/รอบเช้า</label>
+                                <input type="number" step="0.5" value={form.AmHours} onChange={set('AmHours')} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">ชั่วโมง/รอบบ่าย</label>
+                                <input type="number" step="0.5" value={form.PmHours} onChange={set('PmHours')} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                            </div>
+                        </div>
+                        <button onClick={handleSaveParams} className="w-full bg-slate-900 text-white p-3 rounded-lg font-medium mt-5">บันทึกการตั้งค่า</button>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h2 className="text-xl font-bold text-slate-800 mb-2"><i className="fas fa-signature text-emerald-600 mr-2"></i>ผู้รับรองเอกสาร</h2>
+                        <p className="text-sm text-slate-500 mb-4">กรอกไว้ครั้งเดียว ระบบจะพิมพ์ชื่อและตำแหน่งนี้ลงในเอกสารรายงานรายวันให้อัตโนมัติทุกครั้ง (ไม่ต้องพิมพ์ใหม่) เหลือแต่ลงลายมือชื่อจริงด้วยปากกาเท่านั้น</p>
+                        <div className="space-y-3">
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">ชื่อ-สกุลผู้รับรอง</label>
+                                <input type="text" value={certifierName} onChange={e => setCertifierName(e.target.value)} placeholder="เช่น นายสมชาย ใจดี" className="w-full p-2 border border-slate-300 rounded text-sm" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">ตำแหน่ง</label>
+                                <input type="text" value={certifierPosition} onChange={e => setCertifierPosition(e.target.value)} placeholder="เช่น ผู้อำนวยการโรงเรียน" className="w-full p-2 border border-slate-300 rounded text-sm" />
+                            </div>
+                            <button onClick={handleSaveCertifier} className="w-full bg-emerald-600 text-white p-3 rounded-lg font-medium">บันทึกข้อมูลผู้รับรอง</button>
+                        </div>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h2 className="text-xl font-bold text-slate-800 mb-4"><i className="fas fa-key text-amber-600 mr-2"></i>เปลี่ยนรหัสผ่านครู/ผู้ดูแล</h2>
+                        <div className="space-y-3">
+                            <input type="password" placeholder="รหัสผ่านปัจจุบัน" value={currentPin} onChange={e => setCurrentPin(e.target.value)} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                            <input type="password" placeholder="รหัสผ่านใหม่" value={newPin} onChange={e => setNewPin(e.target.value)} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                            <input type="password" placeholder="ยืนยันรหัสผ่านใหม่" value={confirmPin} onChange={e => setConfirmPin(e.target.value)} className="w-full p-2 border border-slate-300 rounded text-sm" />
+                            <button onClick={handleChangePin} className="w-full bg-amber-600 text-white p-3 rounded-lg font-medium">เปลี่ยนรหัสผ่าน</button>
+                        </div>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h2 className="text-xl font-bold text-slate-800 mb-2"><i className="fas fa-table text-slate-600 mr-2"></i>ข้อมูลดิบทั้งหมด</h2>
+                        <p className="text-sm text-slate-500">ข้อมูลนักเรียน การเช็คชื่อ และการตั้งค่าทั้งหมด เก็บอยู่ใน Google Sheet ที่ผูกกับสคริปต์นี้โดยตรง เปิดชีตดู/สำรองข้อมูลได้ตลอดเวลาจาก Google Drive ของคุณครู</p>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
