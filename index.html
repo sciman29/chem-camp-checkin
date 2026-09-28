@@ -110,6 +110,44 @@
         };
         const timeToDec = (str) => { const [h, m] = String(str).split(':').map(Number); return h + (m || 0) / 60; };
 
+        // เวลาแบบไทย (Asia/Bangkok) จาก timestamp ที่เซิร์ฟเวอร์บันทึกไว้ (ไม่ขึ้นกับนาฬิกาเครื่องนักเรียน)
+        const bkkTime = (ts) => {
+            const d = new Date(ts);
+            if (isNaN(d.getTime())) return null;
+            const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(d);
+            const h = Number(parts.find(p => p.type === 'hour').value) % 24;
+            const m = Number(parts.find(p => p.type === 'minute').value);
+            return { h, m, dec: h + m / 60, str: String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') };
+        };
+
+        // เรียงรายชื่อตามเลขที่ (ตัวเลข) ก่อน ถ้าไม่มีเลขที่ให้เรียงตามชื่อ
+        const sortRoster = (list) => [...list].sort((a, b) => {
+            const na = parseInt(a.no, 10), nb = parseInt(b.no, 10);
+            const ha = !isNaN(na), hb = !isNaN(nb);
+            if (ha && hb && na !== nb) return na - nb;
+            if (ha !== hb) return ha ? -1 : 1;
+            return String(a.name).localeCompare(String(b.name), 'th');
+        });
+
+        // ขอตำแหน่ง GPS แบบทนทานขึ้น: ลองความแม่นยำสูงก่อน ถ้าหมดเวลา/หาสัญญาณไม่ได้ ลองใหม่แบบประหยัด (Wi-Fi/เสาสัญญาณ) รอนานขึ้น
+        const getPositionRobust = () => new Promise((resolve, reject) => {
+            if (!('geolocation' in navigator)) { reject({ code: 0 }); return; }
+            navigator.geolocation.getCurrentPosition(resolve, (err1) => {
+                if (err1.code === 1) { reject(err1); return; }
+                navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: false, timeout: 25000, maximumAge: 60000 });
+            }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 });
+        });
+
+        const isInAppBrowser = () => /Line\/|FBAN|FBAV|Instagram|MicroMessenger|Messenger/i.test(navigator.userAgent || '');
+
+        const geoErrorMessage = (err) => {
+            const inApp = isInAppBrowser() ? ' (ตรวจพบว่าเปิดจากในแอป LINE/Facebook — กรุณากดเมนู "เปิดในเบราว์เซอร์" แล้วเปิดด้วย Chrome หรือ Safari แทน)' : '';
+            if (err && err.code === 0) return '❌ อุปกรณ์/เบราว์เซอร์นี้ไม่รองรับ GPS กรุณาเปิดด้วย Chrome หรือ Safari' + inApp;
+            if (err && err.code === 1) return '❌ เบราว์เซอร์ยังไม่ได้รับอนุญาตให้ใช้ตำแหน่ง — ตรวจสอบ 2 จุด: (1) ตั้งค่ามือถือ > ตำแหน่ง/Location Services เปิดอยู่ และอนุญาตให้ Chrome/Safari เข้าถึงตำแหน่ง (2) ในเบราว์เซอร์ กดไอคอนแม่กุญแจข้างชื่อเว็บ > สิทธิ์ > ตำแหน่ง > อนุญาต แล้วรีเฟรชหน้านี้' + inApp;
+            if (err && err.code === 2) return '❌ มือถือหาตำแหน่งไม่เจอ ลองเดินไปใกล้หน้าต่าง/กลางแจ้ง เปิด Wi-Fi และโหมดตำแหน่งแบบความแม่นยำสูง แล้วกดใหม่' + inApp;
+            return '❌ หาตำแหน่งไม่ทันเวลา (สัญญาณ GPS อ่อน) ลองกดอีกครั้ง หรือเดินไปที่โล่ง/ใกล้หน้าต่าง ถ้ายังไม่ได้ให้แจ้งครูเพื่อเช็คชื่อแทน' + inApp;
+        };
+
         // กันพัง: ถ้า Google Sheets แอบแปลงค่าเวลากลับมาเพี้ยน (เช่นได้ ISO date string แทน "08:30")
         // ให้ใช้ค่าปกติแทนไปก่อน แทนที่จะโชว์ข้อความแปลกๆ ให้ผู้ใช้เห็น
         const SAFE_DEFAULT_SETTINGS = { AmStart: '08:30', AmEnd: '12:00', PmStart: '12:30', PmEnd: '16:00' };
@@ -125,6 +163,7 @@
             if (isNaN(Number(s.AmHours)) || Number(s.AmHours) <= 0) s.AmHours = '2.5';
             if (isNaN(Number(s.PmHours)) || Number(s.PmHours) <= 0) s.PmHours = '3';
             if (isNaN(Number(s.EarlyMinutes))) s.EarlyMinutes = '60';
+            if (s.LateMinutes === undefined || s.LateMinutes === '' || isNaN(Number(s.LateMinutes))) s.LateMinutes = '15';
             return s;
         };
 
@@ -193,6 +232,35 @@
             // "เสี่ยง" จริง ก็ต่อเมื่อต่อให้มาเรียนครบทุกวันที่เหลือ ก็ยังไม่ถึงเกณฑ์ที่กำหนด
             const maxPossiblePercent = totalHours ? ((attendedHours + remainingHours) / totalHours * 100) : 0;
             const isAtRisk = maxPossiblePercent < Number(phase.minPercent);
+            return { present, absent, leave, attendedHours, totalHours, remainingHours, percent, isAtRisk };
+        };
+
+        // จัดกลุ่มช่วงเวลา: ช่วงที่ตั้ง "group" เดียวกัน จะถูกรวมชั่วโมง/เกณฑ์เข้าด้วยกันเป็นก้อนเดียว
+        // ช่วงที่ไม่ได้ตั้ง group จะแยกเป็นอิสระของตัวเอง (พฤติกรรมเดิม)
+        const groupPhases = (phases) => {
+            const map = {}; const order = [];
+            phases.forEach(ph => {
+                const key = (ph.group && ph.group.trim()) ? ph.group.trim() : ('__solo__' + ph.id);
+                if (!map[key]) {
+                    map[key] = { key, name: (ph.group && ph.group.trim()) ? ph.group.trim() : ph.name, minPercent: ph.minPercent, phases: [] };
+                    order.push(key);
+                }
+                map[key].phases.push(ph);
+            });
+            return order.map(k => map[k]);
+        };
+
+        // สรุปผลของนักเรียน 1 คน รวมทุกช่วงในกลุ่มเดียวกันเข้าด้วยกัน (ใช้ minPercent ของช่วงแรกในกลุ่มเป็นเกณฑ์)
+        const computeGroupStats = (studentId, group, attendanceMap, settings) => {
+            let present = 0, absent = 0, leave = 0, attendedHours = 0, totalHours = 0, remainingHours = 0;
+            group.phases.forEach(ph => {
+                const s = computePhaseStats(studentId, ph, attendanceMap, settings);
+                present += s.present; absent += s.absent; leave += s.leave;
+                attendedHours += s.attendedHours; totalHours += s.totalHours; remainingHours += s.remainingHours;
+            });
+            const percent = totalHours ? (attendedHours / totalHours * 100) : 0;
+            const maxPossiblePercent = totalHours ? ((attendedHours + remainingHours) / totalHours * 100) : 0;
+            const isAtRisk = maxPossiblePercent < Number(group.minPercent);
             return { present, absent, leave, attendedHours, totalHours, percent, isAtRisk };
         };
 
@@ -328,7 +396,7 @@
                     const { data, fromCache } = await apiGet(apiUrl);
                     setSettings(sanitizeSettings(data.settings));
                     setRawSettings(data.settings);
-                    setRoster(data.students || []);
+                    setRoster(sortRoster(data.students || []));
                     setAttendanceLog(data.attendance || []);
                     setUsingCache(fromCache);
                     if (fromCache && !silent) showToast('⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กำลังแสดงข้อมูลสำรองล่าสุดในเครื่อง', 'error');
@@ -553,7 +621,8 @@
             const today = todayKey();
             const todayRec = (attendanceMap[today] && attendanceMap[today][me.id]) || {};
             const phases = parsePhases(settings);
-            const phaseStats = phases.map(ph => ({ phase: ph, stats: computePhaseStats(me.id, ph, attendanceMap, settings) }));
+            const groups = groupPhases(phases);
+            const phaseStats = groups.map(g => ({ phase: g, stats: computeGroupStats(me.id, g, attendanceMap, settings) }));
             const overall = computeOverallStats(me.id, phases, attendanceMap, settings);
 
             const withinWindow = (session) => {
@@ -591,16 +660,9 @@
                     setIsCheckingIn(false);
                 };
 
-                if ("geolocation" in navigator) {
-                    navigator.geolocation.getCurrentPosition(
-                        (pos) => process(pos.coords.latitude, pos.coords.longitude),
-                        () => { setIsCheckingIn(false); setCheckInMessage({ text: '❌ ไม่สามารถเข้าถึง GPS ได้ กรุณากด "อนุญาต" การเข้าถึงตำแหน่ง', type: 'error' }); },
-                        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-                    );
-                } else {
-                    setIsCheckingIn(false);
-                    setCheckInMessage({ text: '❌ อุปกรณ์ไม่รองรับ GPS', type: 'error' });
-                }
+                getPositionRobust()
+                    .then((pos) => process(pos.coords.latitude, pos.coords.longitude))
+                    .catch((err) => { setIsCheckingIn(false); setCheckInMessage({ text: geoErrorMessage(err), type: 'error' }); });
             };
 
             const myTodayStatus = {
@@ -653,7 +715,7 @@
                         </div>
 
                         {phaseStats.map(({ phase, stats }) => (
-                            <div key={phase.id} className={`p-5 rounded-2xl shadow-sm border ${stats.isAtRisk ? 'bg-rose-50 border-rose-100 text-rose-900' : 'bg-white border-slate-100'}`}>
+                            <div key={phase.key} className={`p-5 rounded-2xl shadow-sm border ${stats.isAtRisk ? 'bg-rose-50 border-rose-100 text-rose-900' : 'bg-white border-slate-100'}`}>
                                 <div className="flex justify-between items-start mb-2">
                                     <h4 className="font-bold text-sm"><i className="fas fa-calendar-alt mr-2"></i>{phase.name}</h4>
                                     <span className={`font-bold text-xl ${stats.isAtRisk ? 'text-rose-600' : 'text-emerald-600'}`}>{stats.percent.toFixed(1)}%</span>
@@ -726,7 +788,7 @@
                 if (!cleanId || !cleanName) { showToast('⚠️ กรุณากรอกรหัสและชื่อให้ครบ', 'error'); return false; }
                 const dup = roster.find(s => s.id === cleanId && s.id !== originalId);
                 if (dup) { showToast('⚠️ มีรหัสนักเรียนนี้อยู่แล้วในระบบ', 'error'); return false; }
-                const ok = await apiPost(apiUrl, { action: 'upsertStudent', id: cleanId, name: cleanName, totalHours: '', originalId });
+                const ok = await apiPost(apiUrl, { action: 'upsertStudent', id: cleanId, name: cleanName, totalHours: '', no: String(data.no || '').trim(), originalId });
                 if (ok) { showToast(originalId ? '✅ บันทึกข้อมูลนักเรียนแล้ว' : '✅ เพิ่มนักเรียนใหม่แล้ว', 'success'); onRefresh(); return true; }
                 showToast('⚠️ บันทึกไม่สำเร็จ กรุณาลองใหม่', 'error');
                 return false;
@@ -782,7 +844,7 @@
             const filteredRoster = useMemo(() => {
                 const q = search.trim().toLowerCase();
                 if (!q) return roster;
-                return roster.filter(s => s.id.toLowerCase().includes(q) || s.name.toLowerCase().includes(q));
+                return roster.filter(s => s.id.toLowerCase().includes(q) || s.name.toLowerCase().includes(q) || String(s.no || '').toLowerCase() === q);
             }, [roster, search]);
 
             const stats = useMemo(() => {
@@ -865,6 +927,7 @@
                             <table className="w-full text-left text-sm whitespace-nowrap">
                                 <thead className="bg-slate-100 border-b border-slate-200">
                                     <tr>
+                                        <th className="p-3 font-semibold text-slate-700">เลขที่</th>
                                         <th className="p-3 font-semibold text-slate-700">รหัส</th>
                                         <th className="p-3 font-semibold text-slate-700">ชื่อ-สกุล</th>
                                         <th className="p-3 font-semibold text-slate-700">เช้า</th>
@@ -875,12 +938,13 @@
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {filteredRoster.length === 0 ? (
-                                        <tr><td colSpan="6" className="p-6 text-center text-slate-500">{roster.length === 0 ? 'ยังไม่มีข้อมูลนักเรียน กด "เพิ่มนักเรียน" เพื่อเริ่มต้น' : 'ไม่พบนักเรียนที่ค้นหา'}</td></tr>
+                                        <tr><td colSpan="7" className="p-6 text-center text-slate-500">{roster.length === 0 ? 'ยังไม่มีข้อมูลนักเรียน กด "เพิ่มนักเรียน" เพื่อเริ่มต้น' : 'ไม่พบนักเรียนที่ค้นหา'}</td></tr>
                                     ) : filteredRoster.map(s => {
                                         const rec = dayRec[s.id] || {};
                                         const delKey = 'del-' + s.id;
                                         return (
                                             <tr key={s.id} className="hover:bg-slate-50 align-top">
+                                                <td className="p-3 font-bold text-slate-700">{s.no || '-'}</td>
                                                 <td className="p-3 font-mono text-slate-600">{s.id}</td>
                                                 <td className="p-3 font-medium text-slate-900">{s.name}</td>
                                                 <td className="p-3">
@@ -888,12 +952,14 @@
                                                         <SegmentedStatus value={getValue(s.id, 'am')} disabled={isPending(s.id, 'am')} onChange={(v) => setStatus(s.id, 'am', v)} />
                                                         {isPending(s.id, 'am') && <i className="fas fa-circle-notch fa-spin text-slate-400 text-xs"></i>}
                                                     </div>
+                                                    <TimeHint rec={rec} session="am" />
                                                 </td>
                                                 <td className="p-3">
                                                     <div className="flex items-center gap-2">
                                                         <SegmentedStatus value={getValue(s.id, 'pm')} disabled={isPending(s.id, 'pm')} onChange={(v) => setStatus(s.id, 'pm', v)} />
                                                         {isPending(s.id, 'pm') && <i className="fas fa-circle-notch fa-spin text-slate-400 text-xs"></i>}
                                                     </div>
+                                                    <TimeHint rec={rec} session="pm" />
                                                 </td>
                                                 <td className="p-3 min-w-[180px]">
                                                     {(rec.am === 'leave' || rec.pm === 'leave') ? (
@@ -920,6 +986,19 @@
             );
         }
 
+        // แสดงเวลาที่เช็คชื่อจริง (เวลาจากเซิร์ฟเวอร์) และวิธีเช็ค ใต้ปุ่มสถานะ
+        function TimeHint({ rec, session }) {
+            if (!rec || rec[session] !== 'present' || !rec[session + 'Time']) return null;
+            const t = bkkTime(rec[session + 'Time']);
+            if (!t) return null;
+            const byTeacher = rec[session + 'Method'] === 'teacher';
+            return (
+                <div className="text-[11px] mt-1 text-slate-400">
+                    {t.str} น. · {byTeacher ? 'ครูเช็คให้' : 'เช็คเอง'}
+                </div>
+            );
+        }
+
         function LeaveDocInput({ value, onSave }) {
             const [local, setLocal] = useState(value);
             useEffect(() => setLocal(value), [value]);
@@ -932,6 +1011,7 @@
         function StudentEditModal({ student, onClose, onSave }) {
             const [id, setId] = useState(student ? student.id : '');
             const [name, setName] = useState(student ? student.name : '');
+            const [no, setNo] = useState(student ? (student.no || '') : '');
 
             return (
                 <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-4 z-50">
@@ -942,6 +1022,10 @@
                         </div>
                         <div className="p-5 space-y-4">
                             <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">เลขที่ (ใช้เรียงลำดับและค้นหาเร็วๆ)</label>
+                                <input type="number" min="1" value={no} onChange={e => setNo(e.target.value)} placeholder="เช่น 1" className="w-full p-2 border border-slate-300 rounded bg-slate-50 text-sm" />
+                            </div>
+                            <div>
                                 <label className="block text-xs font-bold text-slate-500 mb-1">รหัสประจำตัว</label>
                                 <input type="text" value={id} onChange={e => setId(e.target.value)} className="w-full p-2 border border-slate-300 rounded bg-slate-50 text-sm" />
                             </div>
@@ -949,7 +1033,7 @@
                                 <label className="block text-xs font-bold text-slate-500 mb-1">ชื่อ-สกุล</label>
                                 <input type="text" value={name} onChange={e => setName(e.target.value)} className="w-full p-2 border border-slate-300 rounded bg-slate-50 text-sm" />
                             </div>
-                            <button onClick={() => onSave({ id, name }, student ? student.id : null)} className="w-full bg-blue-600 text-white font-bold p-3 rounded-xl mt-2 hover:bg-blue-700">บันทึกข้อมูล</button>
+                            <button onClick={() => onSave({ id, name, no }, student ? student.id : null)} className="w-full bg-blue-600 text-white font-bold p-3 rounded-xl mt-2 hover:bg-blue-700">บันทึกข้อมูล</button>
                         </div>
                     </div>
                 </div>
@@ -1096,15 +1180,16 @@
             const [onlyAtRisk, setOnlyAtRisk] = useState(false);
             const [search, setSearch] = useState('');
             const phases = parsePhases(settings);
+            const groups = groupPhases(phases);
 
             const rows = useMemo(() => {
                 return roster.map(s => {
-                    const perPhase = phases.map(ph => computePhaseStats(s.id, ph, attendanceMap, settings));
+                    const perGroup = groups.map(g => computeGroupStats(s.id, g, attendanceMap, settings));
                     const overall = computeOverallStats(s.id, phases, attendanceMap, settings);
-                    const anyAtRisk = perPhase.some(p => p.isAtRisk);
-                    return { ...s, perPhase, overall, anyAtRisk };
+                    const anyAtRisk = perGroup.some(p => p.isAtRisk);
+                    return { ...s, perGroup, overall, anyAtRisk };
                 }).sort((a, b) => a.overall.percent - b.overall.percent);
-            }, [roster, attendanceMap, settings, phases]);
+            }, [roster, attendanceMap, settings, phases, groups]);
 
             const visibleRows = useMemo(() => {
                 let r = onlyAtRisk ? rows.filter(r => r.anyAtRisk) : rows;
@@ -1116,11 +1201,11 @@
             const exportExcel = () => {
                 const data = rows.map((r, i) => {
                     const row = { 'ลำดับ': i + 1, 'รหัส': r.id, 'ชื่อ-สกุล': r.name };
-                    r.perPhase.forEach((p, idx) => {
-                        row[`${phases[idx].name} - มา`] = p.present;
-                        row[`${phases[idx].name} - ลา`] = p.leave;
-                        row[`${phases[idx].name} - ขาด`] = p.absent;
-                        row[`${phases[idx].name} - %`] = Number(p.percent.toFixed(1));
+                    r.perGroup.forEach((p, idx) => {
+                        row[`${groups[idx].name} - มา`] = p.present;
+                        row[`${groups[idx].name} - ลา`] = p.leave;
+                        row[`${groups[idx].name} - ขาด`] = p.absent;
+                        row[`${groups[idx].name} - %`] = Number(p.percent.toFixed(1));
                     });
                     row['รวมทั้งหมด %'] = Number(r.overall.percent.toFixed(1));
                     row['สถานะ'] = r.anyAtRisk ? 'เสี่ยงหมดสิทธิ์สอบ' : 'ผ่านเกณฑ์';
@@ -1137,9 +1222,12 @@
                     <div className="flex gap-2 no-print">
                         <button onClick={() => setView('summary')} className={`px-4 py-2 rounded-lg text-sm font-medium ${view === 'summary' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-300 text-slate-600'}`}>สรุปทั้งหมด</button>
                         <button onClick={() => setView('daily')} className={`px-4 py-2 rounded-lg text-sm font-medium ${view === 'daily' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-300 text-slate-600'}`}>รายงานรายวัน (สำหรับเบิกจ่าย)</button>
+                        <button onClick={() => setView('late')} className={`px-4 py-2 rounded-lg text-sm font-medium ${view === 'late' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-300 text-slate-600'}`}>ประวัติเวลาเช็คชื่อ</button>
                     </div>
 
-                    {view === 'daily' ? (
+                    {view === 'late' ? (
+                        <PunctualityReport roster={roster} settings={settings} attendanceMap={attendanceMap} />
+                    ) : view === 'daily' ? (
                         <DailyReport roster={roster} settings={settings} attendanceMap={attendanceMap} />
                     ) : (
                     <React.Fragment>
@@ -1178,8 +1266,8 @@
                                         <th className="p-3 font-semibold text-slate-700">ที่</th>
                                         <th className="p-3 font-semibold text-slate-700">รหัส</th>
                                         <th className="p-3 font-semibold text-slate-700">ชื่อ-สกุล</th>
-                                        {phases.map(ph => (
-                                            <th key={ph.id} className="p-3 font-semibold text-slate-700 text-center">{ph.name}<br /><span className="font-normal text-xs text-slate-400">(ต้องการ {ph.minPercent}%)</span></th>
+                                        {groups.map(g => (
+                                            <th key={g.key} className="p-3 font-semibold text-slate-700 text-center">{g.name}<br /><span className="font-normal text-xs text-slate-400">(ต้องการ {g.minPercent}%)</span></th>
                                         ))}
                                         <th className="p-3 font-semibold text-slate-700 text-center">รวมทั้งหมด</th>
                                         <th className="p-3 font-semibold text-slate-700 text-center">สถานะ</th>
@@ -1187,13 +1275,13 @@
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {visibleRows.length === 0 ? (
-                                        <tr><td colSpan={4 + phases.length} className="p-6 text-center text-slate-500">ไม่มีข้อมูล</td></tr>
+                                        <tr><td colSpan={4 + groups.length} className="p-6 text-center text-slate-500">ไม่มีข้อมูล</td></tr>
                                     ) : visibleRows.map((r, i) => (
                                         <tr key={r.id} className={r.anyAtRisk ? 'bg-rose-50' : ''}>
                                             <td className="p-3">{i + 1}</td>
                                             <td className="p-3 font-mono text-slate-600">{r.id}</td>
                                             <td className="p-3 font-medium text-slate-900">{r.name}</td>
-                                            {r.perPhase.map((p, idx) => (
+                                            {r.perGroup.map((p, idx) => (
                                                 <td key={idx} className="p-3 text-center">
                                                     <div className={`font-bold ${p.isAtRisk ? 'text-rose-600' : 'text-emerald-600'}`}>{p.percent.toFixed(1)}%</div>
                                                     <div className="text-[11px] text-slate-400">ม.{p.present} ล.{p.leave} ข.{p.absent}</div>
@@ -1212,6 +1300,136 @@
                     </div>
                     </React.Fragment>
                     )}
+                </div>
+            );
+        }
+
+
+        /* ============================== ATTENDANCE LOG REPORT (NEUTRAL: TIME + HOW CHECKED) ============================== */
+        // เก็บบันทึกเวลา/วิธีเช็คชื่อไว้ดูเฉยๆ ไม่ตัดสินว่าสาย ไม่ติดป้ายเตือน และไม่มีผลกับชั่วโมงเรียนหรือคะแนน
+        function PunctualityReport({ roster, settings, attendanceMap }) {
+            const [search, setSearch] = useState('');
+            const [expanded, setExpanded] = useState(null);
+            const today = todayKey();
+            const nowBkk = bkkTime(new Date().toISOString());
+            const nowDec = nowBkk ? nowBkk.dec : 24;
+            const dates = Object.keys(attendanceMap).filter(d => d <= today).sort();
+
+            const rows = useMemo(() => {
+                return roster.map(s => {
+                    const events = [];
+                    let self = 0, byTeacher = 0, absent = 0, leave = 0;
+                    dates.forEach(date => {
+                        const rec = (attendanceMap[date] && attendanceMap[date][s.id]) || {};
+                        ['am', 'pm'].forEach(sess => {
+                            const end = timeToDec(sess === 'am' ? settings.AmEnd : settings.PmEnd);
+                            const st = rec[sess];
+                            const t = bkkTime(rec[sess + 'Time']);
+                            if (st === 'present') {
+                                if (rec[sess + 'Method'] === 'teacher') { byTeacher++; events.push({ date, sess, kind: 'teacher', time: t ? t.str : '' }); }
+                                else { self++; events.push({ date, sess, kind: 'self', time: t ? t.str : '' }); }
+                            } else if (st === 'leave') {
+                                leave++; events.push({ date, sess, kind: 'leave', time: '' });
+                            } else {
+                                if (date === today && nowDec < end) return; // รอบวันนี้ที่ยังไม่หมดเวลา ยังไม่นับ
+                                absent++; events.push({ date, sess, kind: 'none', time: '' });
+                            }
+                        });
+                    });
+                    return { ...s, self, byTeacher, absent, leave, events };
+                });
+            }, [roster, attendanceMap, settings]);
+
+            const visible = useMemo(() => {
+                const q = search.trim().toLowerCase();
+                if (!q) return rows;
+                return rows.filter(r => r.id.toLowerCase().includes(q) || r.name.toLowerCase().includes(q) || String(r.no || '').toLowerCase() === q);
+            }, [rows, search]);
+
+            const kindLabel = { self: 'เช็คเอง (GPS)', teacher: 'ครูเช็คให้', leave: 'ลา', none: 'ไม่ได้เช็คชื่อ' };
+            const shortDate = (d) => new Date(d + 'T00:00:00').toLocaleDateString('th-TH', { day: 'numeric', month: 'short' });
+
+            const exportExcel = () => {
+                const summary = rows.map(r => ({ 'เลขที่': r.no || '', 'รหัส': r.id, 'ชื่อ-สกุล': r.name, 'เช็คเอง (ครั้ง)': r.self, 'ครูเช็คให้ (ครั้ง)': r.byTeacher, 'ลา (ครั้ง)': r.leave, 'ไม่ได้เช็คชื่อ (ครั้ง)': r.absent }));
+                const detail = [];
+                rows.forEach(r => r.events.forEach(e => detail.push({
+                    'เลขที่': r.no || '', 'รหัส': r.id, 'ชื่อ-สกุล': r.name, 'วันที่': e.date, 'รอบ': e.sess === 'am' ? 'เช้า' : 'บ่าย',
+                    'สถานะ': kindLabel[e.kind], 'เวลาที่บันทึก': e.time
+                })));
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summary), 'สรุป');
+                XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detail.length ? detail : [{ 'หมายเหตุ': 'ยังไม่มีรายการ' }]), 'รายละเอียด');
+                XLSX.writeFile(wb, `ประวัติเวลาเช็คชื่อ_${todayKey()}.xlsx`);
+            };
+
+            return (
+                <div className="space-y-6">
+                    <div className="flex flex-wrap justify-between items-end gap-3">
+                        <div>
+                            <h2 className="text-2xl font-bold text-slate-800">ประวัติเวลาเช็คชื่อ</h2>
+                            <p className="text-sm text-slate-500 mt-1">
+                                บันทึกไว้ดูข้อมูลเท่านั้น ไม่ตัดสินว่ามาสาย ไม่มีผลกับชั่วโมงเรียนหรือคะแนน และนักเรียนมองไม่เห็นหน้านี้ · "ครูเช็คให้" ครอบคลุมทุกกรณี เช่น เรียนออนไลน์ที่บ้าน หรือเช็คเองไม่ได้ · เวลาอ้างอิงจากเซิร์ฟเวอร์
+                            </p>
+                        </div>
+                        <button onClick={exportExcel} className="bg-emerald-600 text-white px-3 py-2 rounded-lg text-sm font-medium hover:bg-emerald-700"><i className="fas fa-file-excel"></i> ส่งออก Excel</button>
+                    </div>
+                    <div className="relative">
+                        <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm"></i>
+                        <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="ค้นหาจากเลขที่ รหัส หรือชื่อ..." className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-lg text-sm" />
+                    </div>
+                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-left text-sm whitespace-nowrap">
+                                <thead className="bg-slate-100 border-b border-slate-200">
+                                    <tr>
+                                        <th className="p-3 font-semibold text-slate-700">เลขที่</th>
+                                        <th className="p-3 font-semibold text-slate-700">รหัส</th>
+                                        <th className="p-3 font-semibold text-slate-700">ชื่อ-สกุล</th>
+                                        <th className="p-3 font-semibold text-slate-700 text-center">เช็คเอง</th>
+                                        <th className="p-3 font-semibold text-slate-700 text-center">ครูเช็คให้</th>
+                                        <th className="p-3 font-semibold text-slate-700 text-center">ลา</th>
+                                        <th className="p-3 font-semibold text-slate-700 text-center">ไม่ได้เช็คชื่อ</th>
+                                        <th className="p-3 font-semibold text-slate-700 text-center">รายละเอียด</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {visible.length === 0 ? (
+                                        <tr><td colSpan="8" className="p-6 text-center text-slate-500">ไม่มีข้อมูล</td></tr>
+                                    ) : visible.map(r => (
+                                        <React.Fragment key={r.id}>
+                                            <tr>
+                                                <td className="p-3 font-bold text-slate-700">{r.no || '-'}</td>
+                                                <td className="p-3 font-mono text-slate-600">{r.id}</td>
+                                                <td className="p-3 font-medium text-slate-900">{r.name}</td>
+                                                <td className="p-3 text-center text-slate-700">{r.self}</td>
+                                                <td className="p-3 text-center text-slate-700">{r.byTeacher}</td>
+                                                <td className="p-3 text-center text-slate-700">{r.leave}</td>
+                                                <td className="p-3 text-center text-slate-700">{r.absent}</td>
+                                                <td className="p-3 text-center">
+                                                    <button disabled={r.events.length === 0} onClick={() => setExpanded(expanded === r.id ? null : r.id)} className="text-blue-600 bg-blue-50 hover:bg-blue-100 disabled:opacity-40 px-2.5 py-1.5 rounded-lg text-xs font-medium">
+                                                        <i className={`fas ${expanded === r.id ? 'fa-chevron-up' : 'fa-chevron-down'}`}></i>
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                            {expanded === r.id && (
+                                                <tr>
+                                                    <td colSpan="8" className="p-3 bg-slate-50">
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {r.events.map((e, i) => (
+                                                                <span key={i} className="text-xs px-2 py-1 rounded border bg-white border-slate-200 text-slate-600">
+                                                                    {shortDate(e.date)} {e.sess === 'am' ? 'เช้า' : 'บ่าย'} · {kindLabel[e.kind]}{e.time ? ` (${e.time} น.)` : ''}
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            )}
+                                        </React.Fragment>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
             );
         }
@@ -1507,12 +1725,19 @@
                     <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                         <h2 className="text-xl font-bold text-slate-800 mb-4"><i className="fas fa-calendar-week text-indigo-600 mr-2"></i>ช่วงเวลาการเข้าค่ายและเกณฑ์แต่ละช่วง</h2>
                         <p className="text-sm text-slate-500 mb-4">แต่ละช่วงมีวันเริ่ม-สิ้นสุด และเกณฑ์ขั้นต่ำ (%) เป็นของตัวเอง เช่น ช่วงแรกต้องมา 80% ช่วงหลังต้องมา 100%</p>
+                        <p className="text-sm text-indigo-600 bg-indigo-50 border border-indigo-100 p-3 rounded-lg mb-4">
+                            <i className="fas fa-layer-group mr-1"></i> ถ้าอยากรวมชั่วโมง/เกณฑ์ของหลายช่วงเข้าเป็นก้อนเดียว (เช่น บรรยายที่ถูกแบ่งเป็น 2 ช่วงเพราะน้ำท่วม) ให้ตั้ง "ชื่อกลุ่ม" เหมือนกันในช่องด้านล่าง — ระบบจะรวมชั่วโมงของช่วงที่ชื่อกลุ่มตรงกันมาคิดเปอร์เซ็นต์เดียว โดยใช้เกณฑ์ % ของช่วงแรกในกลุ่มนั้น ปล่อยว่างไว้หากต้องการให้แยกอิสระตามปกติ
+                        </p>
                         <div className="space-y-3">
                             {phases.map((ph, idx) => (
                                 <div key={ph.id} className="border border-slate-200 rounded-xl p-4 space-y-2">
                                     <div className="flex items-center gap-2">
                                         <input type="text" value={ph.name} onChange={e => updatePhase(idx, 'name', e.target.value)} placeholder="ชื่อช่วง เช่น ช่วงที่ 1" className="flex-1 p-2 border border-slate-300 rounded text-sm font-medium" />
                                         <button onClick={() => removePhase(idx)} className="text-rose-500 hover:bg-rose-50 w-9 h-9 rounded-lg flex items-center justify-center"><i className="fas fa-trash"></i></button>
+                                    </div>
+                                    <div>
+                                        <label className="block text-[11px] text-slate-400 mb-1">ชื่อกลุ่ม (ไม่บังคับ — ใส่เหมือนกันเพื่อรวมกับช่วงอื่น)</label>
+                                        <input type="text" value={ph.group || ''} onChange={e => updatePhase(idx, 'group', e.target.value)} placeholder="เช่น บรรยาย" className="w-full p-2 border border-slate-300 rounded text-sm" />
                                     </div>
                                     <div className="grid grid-cols-3 gap-2">
                                         <div>
