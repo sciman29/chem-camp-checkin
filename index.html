@@ -837,9 +837,55 @@
         function AttendanceTab({ roster, settings, attendanceMap, apiUrl, onEdit, onAddNew, deleteStudent, confirmArm, showToast, onRefresh }) {
             const [selectedDate, setSelectedDate] = useState(todayKey());
             const [search, setSearch] = useState('');
-            const [pending, setPending] = useState({}); // `${studentId}-${session}` -> status being saved (optimistic)
+            const [pending, setPending] = useState({}); 
             const dayRec = attendanceMap[selectedDate] || {};
             const isToday = selectedDate === todayKey();
+
+            // --- ส่วนที่ 1: ตรวจสอบเวลา 09.30 และ 13.30 ---
+            const now = new Date();
+            // ถ้าเป็นข้อมูลย้อนหลัง ถือว่าเลยเวลา 09.30/13.30 ของวันนั้นไปแล้วเสมอ
+            const isAfter930 = !isToday || (now.getHours() > 9 || (now.getHours() === 9 && now.getMinutes() >= 30));
+            const isAfter1330 = !isToday || (now.getHours() > 13 || (now.getHours() === 13 && now.getMinutes() >= 30));
+
+            // กรองหาคนที่ยังไม่เช็คชื่อ
+            const missingAmStudents = useMemo(() => roster.filter(s => !dayRec[s.id] || !dayRec[s.id].am), [roster, dayRec]);
+            const missingPmStudents = useMemo(() => roster.filter(s => !dayRec[s.id] || !dayRec[s.id].pm), [roster, dayRec]);
+
+            const handleCopyMissing = (session) => {
+                const list = session === 'am' ? missingAmStudents : missingPmStudents;
+                const text = list.map(s => {
+                    const n = parseInt(s.no, 10);
+                    const noStr = isNaN(n) ? (s.no || '-') : String(n).padStart(2, '0');
+                    return `${noStr} ${s.name}`;
+                }).join('\n');
+                
+                if (!text) {
+                    showToast('ไม่มีรายชื่อให้คัดลอก', 'info');
+                    return;
+                }
+
+                if (navigator.clipboard && window.isSecureContext) {
+                    navigator.clipboard.writeText(text).then(() => {
+                        showToast(`✅ คัดลอกรายชื่อรอบ${session === 'am' ? 'เช้า' : 'บ่าย'}แล้ว`, 'success');
+                    }).catch(() => {
+                        showToast('❌ คัดลอกไม่สำเร็จ', 'error');
+                    });
+                } else {
+                    // Fallback สำหรับแอป LINE หรือ Browser เก่า
+                    const textArea = document.createElement("textarea");
+                    textArea.value = text;
+                    document.body.appendChild(textArea);
+                    textArea.select();
+                    try {
+                        document.execCommand('copy');
+                        showToast(`✅ คัดลอกรายชื่อรอบ${session === 'am' ? 'เช้า' : 'บ่าย'}แล้ว`, 'success');
+                    } catch (err) {
+                        showToast('❌ ไม่สามารถคัดลอกอัตโนมัติได้', 'error');
+                    }
+                    document.body.removeChild(textArea);
+                }
+            };
+            // ------------------------------------------
 
             const filteredRoster = useMemo(() => {
                 const q = search.trim().toLowerCase();
@@ -868,7 +914,7 @@
 
             const setStatus = async (studentId, session, status) => {
                 const key = `${studentId}-${session}`;
-                setPending(p => ({ ...p, [key]: status })); // อัปเดตหน้าจอทันที ไม่ต้องรอเซิร์ฟเวอร์
+                setPending(p => ({ ...p, [key]: status }));
                 const ok = await apiPost(apiUrl, { action: 'setStatus', date: selectedDate, studentId, session, status, method: 'teacher' });
                 if (!ok) showToast('⚠️ บันทึกไม่สำเร็จ กรุณาลองใหม่', 'error');
                 await onRefresh();
@@ -916,6 +962,29 @@
                         </div>
                     </div>
 
+                    {/* --- ส่วนที่ 2: กล่องติดตามรายชื่อคนที่ยังไม่เช็คชื่อ --- */}
+                    {(isAfter930 || isAfter1330) && (missingAmStudents.length > 0 || missingPmStudents.length > 0) && (
+                        <div className="bg-rose-50 p-4 rounded-xl border border-rose-200 flex flex-col sm:flex-row justify-between items-center gap-4 no-print shadow-sm">
+                            <div>
+                                <h3 className="font-bold text-rose-800"><i className="fas fa-clipboard-list mr-2"></i>นักเรียนที่ยังไม่เช็คชื่อ</h3>
+                                <p className="text-xs text-rose-600 mt-1">เลยกำหนดเวลาแล้ว (เช้า 09.30 / บ่าย 13.30) สามารถคัดลอกรายชื่อเพื่อไปตามตัวได้</p>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                                {isAfter930 && missingAmStudents.length > 0 && (
+                                    <button onClick={() => handleCopyMissing('am')} className="bg-white hover:bg-rose-100 text-rose-700 border border-rose-300 px-3 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm">
+                                        <i className="far fa-copy mr-1"></i> คัดลอกรอบเช้า ({missingAmStudents.length})
+                                    </button>
+                                )}
+                                {isAfter1330 && missingPmStudents.length > 0 && (
+                                    <button onClick={() => handleCopyMissing('pm')} className="bg-white hover:bg-rose-100 text-rose-700 border border-rose-300 px-3 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm">
+                                        <i className="far fa-copy mr-1"></i> คัดลอกรอบบ่าย ({missingPmStudents.length})
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                    {/* ---------------------------------------------------- */}
+
                     <div className="relative no-print">
                         <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm"></i>
                         <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="ค้นหาจากรหัสหรือชื่อนักเรียน..."
@@ -942,11 +1011,23 @@
                                     ) : filteredRoster.map(s => {
                                         const rec = dayRec[s.id] || {};
                                         const delKey = 'del-' + s.id;
+
+                                        // --- ส่วนที่ 3: เช็คเงื่อนไขทำไฮไลต์ให้คนที่ยังไม่เช็คชื่อ และเลยเวลา ---
+                                        const notCheckedAm = !rec.am;
+                                        const notCheckedPm = !rec.pm;
+                                        const isMissingHighlight = (isAfter930 && notCheckedAm) || (isAfter1330 && notCheckedPm);
+                                        
+                                        const rowClass = `align-top transition-colors ${isMissingHighlight ? 'bg-rose-50/70 hover:bg-rose-100' : 'hover:bg-slate-50'}`;
+                                        // ----------------------------------------------------------------------
+
                                         return (
-                                            <tr key={s.id} className="hover:bg-slate-50 align-top">
-                                                <td className="p-3 font-bold text-slate-700">{s.no || '-'}</td>
+                                            <tr key={s.id} className={rowClass}>
+                                                <td className={`p-3 font-bold ${isMissingHighlight ? 'text-rose-700' : 'text-slate-700'}`}>{s.no || '-'}</td>
                                                 <td className="p-3 font-mono text-slate-600">{s.id}</td>
-                                                <td className="p-3 font-medium text-slate-900">{s.name}</td>
+                                                <td className={`p-3 font-medium ${isMissingHighlight ? 'text-rose-900' : 'text-slate-900'}`}>
+                                                    {s.name}
+                                                    {isMissingHighlight && <span className="ml-2 inline-flex items-center text-[10px] bg-rose-200 text-rose-800 px-1.5 py-0.5 rounded-full font-bold no-print">ยังไม่เช็คชื่อ</span>}
+                                                </td>
                                                 <td className="p-3">
                                                     <div className="flex items-center gap-2">
                                                         <SegmentedStatus value={getValue(s.id, 'am')} disabled={isPending(s.id, 'am')} onChange={(v) => setStatus(s.id, 'am', v)} />
