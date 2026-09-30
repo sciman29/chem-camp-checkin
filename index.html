@@ -209,19 +209,44 @@
         const computePhaseStats = (studentId, phase, attendanceMap, settings) => {
             const dates = dateRange(phase.start, phase.end);
             const today = todayKey();
+            
+            // เพิ่มการดึงเวลาปัจจุบัน เพื่อไม่ให้รอบที่ยังไม่จบถูกด่วนสรุปว่า "ขาด"
+            const now = new Date();
+            const nowDec = now.getHours() + now.getMinutes() / 60;
+            const amEnd = timeToDec(settings.AmEnd);
+            const pmEnd = timeToDec(settings.PmEnd);
+            
             const amH = Number(settings.AmHours), pmH = Number(settings.PmHours);
             let present = 0, absent = 0, leave = 0, attendedHours = 0, remainingHours = 0;
             const totalHours = dates.length * (amH + pmH);
+            
             dates.forEach(date => {
                 const rec = (attendanceMap[date] && attendanceMap[date][studentId]) || {};
                 if (rec.am === 'present') attendedHours += amH;
                 if (rec.pm === 'present') attendedHours += pmH;
-                if (date <= today) {
+                
+                if (date < today) {
+                    // วันที่ผ่านไปแล้ว: ถ้าช่องว่าง ถือว่าขาด
                     ['am', 'pm'].forEach(sess => {
                         const st = rec[sess] || 'absent';
                         if (st === 'present') present++;
                         else if (st === 'leave') leave++;
                         else absent++;
+                    });
+                } else if (date === today) {
+                    // วันนี้: เช็คก่อนว่าหมดเวลารอบนั้นหรือยัง
+                    ['am', 'pm'].forEach(sess => {
+                        const st = rec[sess];
+                        const end = sess === 'am' ? amEnd : pmEnd;
+                        
+                        if (st === 'present') present++;
+                        else if (st === 'leave') leave++;
+                        else if (st === 'absent') absent++;
+                        else {
+                            // หากช่องยังว่าง และเลยกำหนดเวลาเช็คชื่อของรอบนั้นไปแล้ว ถึงจะนับว่าขาด
+                            if (nowDec > end) absent++;
+                            else remainingHours += (sess === 'am' ? amH : pmH);
+                        }
                     });
                 } else {
                     // วันที่ยังไม่มาถึง ยังมีโอกาสมาเรียนเพิ่มได้อีก
@@ -787,7 +812,7 @@
                 const cleanName = data.name.trim();
                 if (!cleanId || !cleanName) { showToast('⚠️ กรุณากรอกรหัสและชื่อให้ครบ', 'error'); return false; }
                 const dup = roster.find(s => s.id === cleanId && s.id !== originalId);
-                if (dup) { showToast('⚠️ มีรหัสนักเรียนนี้อยู่แล้วในระบบ', 'error'); return false; }
+                if (dup) { showToast('⚠️️ มีรหัสนักเรียนนี้อยู่แล้วในระบบ', 'error'); return false; }
                 const ok = await apiPost(apiUrl, { action: 'upsertStudent', id: cleanId, name: cleanName, totalHours: '', no: String(data.no || '').trim(), originalId });
                 if (ok) { showToast(originalId ? '✅ บันทึกข้อมูลนักเรียนแล้ว' : '✅ เพิ่มนักเรียนใหม่แล้ว', 'success'); onRefresh(); return true; }
                 showToast('⚠️ บันทึกไม่สำเร็จ กรุณาลองใหม่', 'error');
@@ -1745,7 +1770,7 @@
             const handleSaveCertifier = async () => {
                 const ok = await apiPost(apiUrl, { action: 'updateSettings', settings: { CertifierName: certifierName, CertifierPosition: certifierPosition } });
                 if (ok) { showToast('✅ บันทึกข้อมูลผู้รับรองแล้ว', 'success'); onRefresh(); }
-                else showToast('⚠️ บันทึกไม่สำเร็จ', 'error');
+                else showToast('⚠️️ บันทึกไม่สำเร็จ', 'error');
             };
 
             const handleUseMyLocation = () => {
